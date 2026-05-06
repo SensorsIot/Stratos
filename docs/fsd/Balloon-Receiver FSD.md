@@ -373,7 +373,7 @@ Total cold boot to "device usable" target: ≤ 5 s (excluding WiFi STA associati
 - **FR-6.4** [Must]: The device shall expose `GET /api/state` returning the current state and most recent decoded frame as JSON.
 - **FR-6.5** [Must]: The device shall expose `GET /api/config` returning the persisted configuration as JSON, with the WiFi password redacted (returned as `"***"` if set, `""` if unset).
 - **FR-6.6** [Must]: The device shall expose `POST /api/config` accepting a JSON body matching the config schema, validating fields, persisting on success, and returning 400 with a problem description on failure.
-- **FR-6.7** [Should]: The device shall expose `POST /api/ota` accepting `{"url": "..."}` and triggering an OTA download from the given HTTPS URL.
+- **FR-6.7** [Should]: The device shall expose `POST /api/ota/upload` (browser-uploaded path) and `POST /api/ota/pull` (receiver-pulled path) per FR-11.x. The HTML UI shall present both as appropriate to the current connectivity mode (`upload` always, `pull` only when STA-connected with internet).
 - **FR-6.8** [Should]: The HTML/JS payload shall be embedded in the firmware via `EMBED_TXTFILES` (no SPIFFS / LittleFS).
 
 #### Group 7 — WiFi
@@ -406,10 +406,34 @@ Total cold boot to "device usable" target: ≤ 5 s (excluding WiFi STA associati
 
 #### Group 11 — OTA
 
-- **FR-11.1** [Must]: The device shall support OTA firmware updates via `esp_https_ota` triggered by HTTP or BLE.
-- **FR-11.2** [Must]: The device shall use dual A/B OTA partitions with automatic rollback on boot failure.
-- **FR-11.3** [Must]: The device shall reject firmware images that do not match this project's chip target and image header.
-- **FR-11.4** [Should]: The device shall report OTA progress (start, percent, complete, error) via logs and (where in scope) live status.
+The firmware shall support **two OTA paths** to handle both connected and field-only scenarios:
+
+##### 11a — Browser-uploaded OTA (field path, AP-only)
+
+This path works when the receiver has no internet (AP-only mode) but the operator's phone does (cellular). The phone fetches the `.bin` from GitHub via cellular and uploads it to the receiver over the AP.
+
+- **FR-11.1** [Must]: The device shall expose `POST /api/ota/upload` accepting a multipart upload of a single `firmware.bin` file. The receiver shall stream the body directly into the inactive OTA partition without buffering the entire image in RAM.
+- **FR-11.2** [Must]: The web UI shall provide a single "Update firmware" panel that:
+  1. Queries GitHub's Releases API (`https://api.github.com/repos/SensorsIot/Balloon-Receiver/releases/latest`) **from the browser** to discover the latest release tag and asset URL.
+  2. Downloads the `.bin` asset from `*.githubusercontent.com` **in the browser**.
+  3. POSTs the downloaded bytes to `/api/ota/upload`.
+  4. Displays progress for both download and upload phases.
+- **FR-11.3** [Must]: All GitHub API and asset traffic shall happen **in the browser** (the phone), never in the receiver. The receiver does not need internet for this path to work.
+
+##### 11b — Receiver-pulled OTA (desk path, STA online)
+
+This path is a convenience when the receiver is on a WiFi network with internet.
+
+- **FR-11.4** [Should]: The device shall expose `POST /api/ota/pull` (no body required) which causes the receiver itself to query GitHub Releases and run `esp_https_ota` against the latest asset URL. Returns 503 if the receiver is in AP-only mode.
+- **FR-11.5** [Should]: The receiver shall ship with a CA bundle covering `*.github.com` and `*.githubusercontent.com` issuers (DigiCert root, Let's Encrypt root). The bundle shall be embedded via `EMBED_TXTFILES`.
+- **FR-11.6** [May]: The receiver-pulled path shall also accept an explicit `{"url": "https://..."}` body to override the GitHub-default source — useful for staging builds.
+
+##### 11c — Common OTA properties
+
+- **FR-11.7** [Must]: The device shall use **dual A/B OTA partitions** with automatic rollback on boot failure (built-in ESP-IDF behaviour).
+- **FR-11.8** [Must]: The device shall reject firmware images whose ESP-IDF image header does not match this project's chip target.
+- **FR-11.9** [Should]: The device shall report OTA progress (started / N % / complete / error) via `ESP_LOG`, the BLE TX channel, and (for path 11a) a SSE stream on `GET /api/ota/progress` so the web UI can render a progress bar.
+- **FR-11.10** [Must]: After a successful OTA, the device shall reboot automatically into the new image and report the new version in the next `?`-reply (frame `3`) and `GET /api/version`.
 
 #### Group 12 — Logging & diagnostics
 
@@ -470,6 +494,8 @@ Total cold boot to "device usable" target: ≤ 5 s (excluding WiFi STA associati
 | **R-4** BLE + WiFi coexistence on shared 2.4 GHz radio. | Low | Medium | Standard ESP32 dual-mode is well supported; allocate one dedicated soak test in Phase 5 (NFR-2.1). |
 | **R-5** No real sonde available for testing during dry seasons / non-launch windows. | Medium | Medium | Record I/Q with rtl-sdr during a launch window; replay through the SX1276 via attenuator and dummy-load coupling, or via a second SX1276 in TX mode (test rig only — not the production firmware). |
 | **R-6** Flash / RAM pressure when adding NimBLE + WiFi + httpd + OLED + decoder. | Low | Medium | Budget early (target build ≤ 70 % of 4 MB flash, ≤ 60 % of 320 KB heap at idle). Profile in Phase 1. |
+| **R-7** GitHub TLS chain rotation breaks receiver-pulled OTA. GitHub may rotate intermediate CA certs faster than the embedded CA bundle is updated. | Medium | Low (browser-uploaded path is unaffected) | Embed root CAs only (longer-lived) and configure `esp_https_ota` to validate via root. The browser-uploaded path (FR-11.1..3) is the canonical field path and bypasses this risk entirely. |
+| **R-8** GitHub Releases API CORS for browser-side fetch. The browser must be able to read `api.github.com` JSON cross-origin from the receiver's `192.168.4.1` page. | Low | Low | `api.github.com` sets `Access-Control-Allow-Origin: *` for unauthenticated GET requests on public repos — verified at design time. |
 
 ### 5.2 Assumptions
 
@@ -533,8 +559,10 @@ The protocol on top of the NUS byte stream conforms to MySondy Go API v3.0. Outp
 | `/api/config` | GET | Persisted configuration | JSON, see §6.3.2 (passwords redacted) |
 | `/api/config` | POST | Update configuration | JSON body (§6.3.2); 200 OK on success, 400 + problem JSON on failure |
 | `/api/factory-reset` | POST | Trigger factory reset + reboot | empty body; 202 Accepted then reboot |
-| `/api/ota` | POST | Trigger OTA update | `{"url": "https://..."}`; 202 Accepted; status via logs |
-| `/api/version` | GET | Firmware build info | `{"version": "1.0.0+abcdef1", "idf": "5.x"}` |
+| `/api/ota/upload` | POST | Browser-uploaded OTA (multipart `firmware.bin`) | 202 Accepted; receiver streams body to OTA partition. |
+| `/api/ota/pull` | POST | Receiver-pulled OTA from GitHub Releases | empty body for default (latest GitHub release); `{"url":"..."}` to override. 503 if no internet. |
+| `/api/ota/progress` | GET | OTA progress stream (Server-Sent Events) | text/event-stream; events `start`, `progress {pct}`, `complete`, `error {msg}`. |
+| `/api/version` | GET | Firmware build info | `{"version": "1.0.0+abcdef1", "idf": "5.x", "github_repo": "SensorsIot/Balloon-Receiver"}` |
 
 All JSON responses use `Content-Type: application/json; charset=utf-8`. CORS not enabled (local-network use).
 
@@ -699,9 +727,24 @@ See §10 Appendix B for the complete command/frame table. Honoured commands and 
 
 ### 7.5 OTA firmware update
 
-1. Host the new `firmware.bin` on an HTTPS server reachable from the device.
-2. Either: `POST /api/ota` with `{"url":"https://host/firmware.bin"}`, or send the equivalent BLE command (TBD — to be added in Phase 5 if the MySondy Go protocol does not include one; otherwise via web UI button).
-3. Device downloads, verifies, reboots into new firmware. On boot failure → automatic rollback to previous image.
+Two flows are supported.
+
+**Field flow (phone on receiver AP, no receiver internet):**
+
+1. On the phone, ensure cellular data is on.
+2. Connect the phone to the receiver's AP `MySondyGo-XXXX`.
+3. Open `http://192.168.4.1` in the phone's browser.
+4. Click "Update firmware". The browser:
+   - Queries `https://api.github.com/repos/SensorsIot/Balloon-Receiver/releases/latest` over cellular.
+   - Downloads the `.bin` from the asset URL over cellular.
+   - Uploads it to the receiver via the AP.
+5. The receiver writes to the inactive OTA slot, verifies the image header, and reboots. If the new image fails to boot, A/B rollback automatically restores the previous image.
+
+**Desk flow (receiver on home WiFi):**
+
+1. Open the receiver's web page on its STA IP.
+2. Click "Check for update". The receiver itself fetches the latest release from GitHub via `esp_https_ota` and applies it.
+3. Same A/B rollback behaviour as above.
 
 ### 7.6 Recovery procedures
 
@@ -784,9 +827,12 @@ See §10 Appendix B for the complete command/frame table. Honoured commands and 
 | ACC-001 | 24 h soak, BLE+WiFi+RS41 active | Free heap drift ≤ 5 %, no reboots, no decoded-frame loss > 5 %. |
 | ACC-002 | Field acquisition | Real launch within 100 km. Lock acquired ≤ 60 s after sonde rises above local horizon. |
 | ACC-003 | OTA round-trip | Update from v1.0.0 → v1.0.1 → bad image → automatic rollback. |
-| TC-OTA-100 | Successful OTA | `POST /api/ota` with valid URL. | New version reported in next BLE frame. |
-| TC-OTA-101 | OTA rollback | Push intentionally-broken image. | Auto-rollback within 2 boot attempts. |
+| TC-OTA-100 | Successful OTA — pull path | `POST /api/ota/pull` (receiver online). | Latest GitHub release applied; new version in next BLE frame. |
+| TC-OTA-101 | OTA rollback | Push intentionally-broken image via either path. | Auto-rollback within 2 boot attempts. |
 | TC-OTA-102 | Version reporting | `GET /api/version` and BLE `?` response. | Same version string in both. |
+| TC-OTA-103 | Successful OTA — browser upload path | Phone with cellular on receiver AP; click "Update firmware" in web UI. Phone fetches latest release from GitHub, uploads via `POST /api/ota/upload`. | Update applies; new version reported on reboot. |
+| TC-OTA-104 | Pull-path 503 in AP-only mode | Disconnect receiver from STA so it falls back to AP. `POST /api/ota/pull`. | 503 returned; logged; no OTA attempted. |
+| TC-OTA-105 | Progress SSE | Subscribe to `GET /api/ota/progress`. Trigger any OTA. | `start`, ≥ 5 `progress` events, `complete` (or `error`). |
 
 ### 8.5 Traceability Matrix
 
@@ -854,10 +900,16 @@ See §10 Appendix B for the complete command/frame table. Honoured commands and 
 | FR-10.1 | Must | TC-OLED-101 | Covered |
 | FR-10.2 | Must | TC-NVS-102 | Covered |
 | FR-10.3 | Should | TC-OLED-101 | Covered |
-| FR-11.1 | Must | TC-OTA-100 | Covered |
-| FR-11.2 | Must | TC-OTA-101 | Covered |
-| FR-11.3 | Must | EC-OTA-202 | Covered |
-| FR-11.4 | Should | TC-OTA-100 (progress logged) | Covered |
+| FR-11.1 | Must | TC-OTA-103 | Covered |
+| FR-11.2 | Must | TC-OTA-103 | Covered |
+| FR-11.3 | Must | TC-OTA-103 (no receiver internet during upload phase verifiable via firewall) | Covered |
+| FR-11.4 | Should | TC-OTA-100, TC-OTA-104 | Covered |
+| FR-11.5 | Should | TC-OTA-100 (CA chain validates GitHub) | Covered |
+| FR-11.6 | May | TC-OTA-100 (variant with explicit URL) | Covered |
+| FR-11.7 | Must | TC-OTA-101, EC-OTA-201 | Covered |
+| FR-11.8 | Must | EC-OTA-202 | Covered |
+| FR-11.9 | Should | TC-OTA-105 | Covered |
+| FR-11.10 | Must | TC-OTA-100, TC-OTA-103, TC-OTA-102 | Covered |
 | FR-12.1 | Must | TC-LOG-100 | Covered |
 | FR-12.2 | Should | TC-LOG-101 | Covered |
 | FR-12.3 | Must | EC-NVS-203 | Covered |
