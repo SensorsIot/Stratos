@@ -348,13 +348,26 @@ Total cold boot to "device usable" target: ≤ 5 s (excluding WiFi STA associati
 - **FR-5.6** [Should]: The device shall accept `mute=<0|1>` and store the value (no audible effect since no buzzer in v1).
 - **FR-5.7** [Should]: The device shall accept `myCall=<text>` (max 8 chars), `aprsName=<0|1>`, `freqofs=<Hz>`.
 - **FR-5.8** [Should]: The device shall accept `rs41.rxbw=<idx>` etc. and apply the corresponding RX bandwidth from MySondy Go API Appendix 2 to the active radio profile.
-- **FR-5.9** [May]: The device shall accept all pin-config and serial-config commands (`oled_sda`, `oled_scl`, `oled_rst`, `led_pout`, `buz_pin`, `battery`, `lcd`, `lcdOn`, `com`, `baud`, `vBatMin`, `vBatMax`, `vBatType`) and acknowledge them by emitting an updated `3/...` frame, but shall not change runtime hardware behaviour.
+- **FR-5.9** [May]: The device shall accept all pin-config and serial-config commands (`oled_sda`, `oled_scl`, `oled_rst`, `led_pout`, `buz_pin`, `battery`, `lcd`, `lcdOn`, `com`, `baud`) and acknowledge them by emitting an updated `3/...` frame, but shall not change runtime hardware behaviour.
+- **FR-5.11** [Should]: The device shall honour `vBatMin=<mV>`, `vBatMax=<mV>`, `vBatType=<0|1|2>` commands by persisting them to NVS and using them for the next battery percentage calculation. These are real configuration, not pin-config.
 - **FR-5.10** [May]: The device shall accept `sleep=<n>` and respond by logging the command; no deep-sleep transition occurs in v1 (see §5).
+
+#### Group 5b — Battery measurement
+
+- **FR-5b.1** [Must]: The device shall sample battery voltage on `GPIO35` (ADC1_CH7) using the ESP32 ADC with 11 dB attenuation and apply the 2:1 on-board divider ratio so `Vbatt_mV = Vadc_mV × 2`.
+- **FR-5b.2** [Should]: The device shall use ESP-IDF eFuse-based ADC calibration (`esp_adc_cal`) to compensate for per-chip ADC offset and slope.
+- **FR-5b.3** [Should]: The device shall low-pass-filter the raw ADC reading (e.g. 16-sample moving average at 1 Hz) to suppress noise from concurrent radio activity.
+- **FR-5b.4** [Must]: The device shall report `BATV` (millivolts, integer) and `BAT%` (0..100, integer) in BLE frames `0`, `1`, and `2`. When no battery is detected (`Vbatt_mV < 2.0 V`), `BAT%` shall be `-1` and `BATV` may be reported as the raw measurement or `0`.
+- **FR-5b.5** [Must]: The `BAT%` calculation shall apply the curve selected by `vBatType` between `vBatMin` and `vBatMax`:
+  - `0` Linear: `pct = clamp((Vbatt − vBatMin) / (vBatMax − vBatMin), 0, 1) × 100`
+  - `1` Sigmoidal (default): smoother S-curve approximating Li-Ion discharge.
+  - `2` Anti-sigmoidal: inverse curvature (steep at extremes).
+- **FR-5b.6** [Should]: Default values shall be `vBatMin = 2950 mV`, `vBatMax = 4200 mV`, `vBatType = 1` (sigmoidal). Note that `vBatMax = 4200` deviates from MySondy Go API's default of `4180`; this matches typical 18650 fresh-off-the-charger voltage.
 
 #### Group 6 — Web UI / HTTP API
 
 - **FR-6.1** [Must]: The device shall serve a single-page HTML configuration UI at `GET /`.
-- **FR-6.2** [Must]: The UI shall provide form fields for: frequency (MHz), sonde type (dropdown), MYCALL, WiFi SSID, WiFi password, BLE on/off.
+- **FR-6.2** [Must]: The UI shall provide form fields for: frequency (MHz), sonde type (dropdown), MYCALL, WiFi SSID, WiFi password, BLE on/off, **battery calibration** — `vBatMax` (mV, default 4200), `vBatMin` (mV, default 2950), `vBatType` (Linear / Sigmoidal / Anti-sigmoidal, default Sigmoidal). The UI shall display the current measured `BATV` next to the `vBatMax` field as a one-click "set to current full-charge reading" calibration helper.
 - **FR-6.3** [Must]: The UI shall display a live status panel showing: state, decoded NAME, latitude, longitude, altitude, RSSI, battery voltage, firmware version. Live data shall refresh ≤ 2 s after each decoded frame.
 - **FR-6.4** [Must]: The device shall expose `GET /api/state` returning the current state and most recent decoded frame as JSON.
 - **FR-6.5** [Must]: The device shall expose `GET /api/config` returning the persisted configuration as JSON, with the WiFi password redacted (returned as `"***"` if set, `""` if unset).
@@ -460,7 +473,7 @@ Total cold boot to "device usable" target: ≤ 5 s (excluding WiFi STA associati
 - (assumed) **Logging UDP target** is unset by default; serial-only logging is the baseline.
 - (assumed) **OTA signing** is OFF by default in v1 (image header validation only). Signed-OTA is a v1.1 hardening item.
 - (assumed) **`tipo=4` PILOT** maps to no decoder; the device responds to settings queries with `tipo=4` but produces only `0/.../o` heartbeat frames.
-- (assumed) **Decoded `BAT%` and `BATV`**: when no battery is present, `BAT%=-1`, `BATV=0`. When battery is present, computed from the GPIO35 voltage divider with `vBatMin`/`vBatMax`/`vBatType` curves from MySondy Go API.
+- (assumed) **Decoded `BAT%` and `BATV`**: when no battery is present, `BAT%=-1`, `BATV=0`. When battery is present, computed from the GPIO35 voltage divider (2:1) with `vBatMin`/`vBatMax`/`vBatType` curves per FR-5b.x. Default `vBatMax=4200 mV` (project choice) rather than the API's `4180 mV`.
 
 ### 5.3 External Dependencies
 
@@ -589,7 +602,10 @@ Event `CFG_EVT_CHANGED` carrying a bitmask of changed fields. Subscribers: RF dr
   "mycall": "MYCALL",
   "wifi_ssid": "homeap",
   "wifi_psk": "***",
-  "ble_on": true
+  "ble_on": true,
+  "vbat_min_mv": 2950,
+  "vbat_max_mv": 4200,
+  "vbat_type": 1
 }
 ```
 
@@ -608,6 +624,9 @@ POST request omits `wifi_psk` to leave it unchanged; explicit empty string clear
 | `mysongo` | `oled_persist` | `u8` | `1` | OLED last on/off state |
 | `mysongo` | `freqofs_hz` | `i32` | `0` | Per-radio offset (MySondy `freqofs`) |
 | `mysongo` | `rxbw_idx` | `u8` per type | RS41=4, M20=7, M10=7, PILOT=7, DFM=6 | MySondy Appendix 2 indices |
+| `mysongo` | `vbat_min_mv` | `u16` | `2950` | Battery empty threshold |
+| `mysongo` | `vbat_max_mv` | `u16` | `4200` | Battery full threshold (project default; API default is 4180) |
+| `mysongo` | `vbat_type` | `u8` | `1` | 0=Linear, 1=Sigmoidal, 2=Anti-sigmoidal |
 | `mysongo` | `udp_log_host` | `str[32]` | `""` | Optional UDP log target |
 | `mysongo` | `udp_log_port` | `u16` | `0` | 0 = disabled |
 
@@ -734,6 +753,11 @@ See §10 Appendix B for the complete command/frame table. Honoured commands and 
 | TC-MSG-116 | Sleep no-op | Send `o{sleep=10}o`. | Logged as no-op; device stays awake. |
 | TC-MSG-117 | rxbw applied | Send `o{rs41.rxbw=7}o`. | RX BW register reflects 12.5 kHz. |
 | TC-MSG-118 | Invalid envelope | Send `f=404.0` (no `o{}o`). | Ignored silently. |
+| TC-BAT-100 | Battery voltage measurement | Connect 18650 at 4.10 V (DMM-verified). Read `BATV` from frame `0`. | `BATV` within ±50 mV of 4100. |
+| TC-BAT-101 | No-battery detection | Disconnect battery, run on USB only. | `BAT%` = `-1`, `BATV` = 0 (or noise floor). |
+| TC-BAT-102 | vBatMax calibration | Send `o{vBatMax=4150}o`, then read `3/...` frame. Battery at 4.15 V. | `BAT%` = 100. |
+| TC-BAT-103 | vBatType curves | Battery at 3.7 V mid-discharge with `vBatType=0` (linear) vs `vBatType=1` (sigmoidal). | Linear ≈ 65 %, sigmoidal ≈ 50 % (per S-curve). |
+| TC-BAT-104 | Web UI calibration round-trip | Open UI, set vBatMax=4180, save, reload. | Persisted; new value reflected in frame `3`. |
 | EC-BLE-201 | Connect/disconnect churn | Connect/disconnect 20× rapidly. | No crash, heap stable, advertising resumes. |
 | EC-BLE-203 | BLE+WiFi coexistence | OTA over WiFi while BLE connected. | BLE stays connected or recovers; OTA succeeds. |
 | TC-MSG-200 | MySondy Go app round-trip | Connect via the official app. | App shows live data; commands round-trip. |
@@ -784,6 +808,13 @@ See §10 Appendix B for the complete command/frame table. Honoured commands and 
 | FR-5.8 | Should | TC-MSG-117 | Covered |
 | FR-5.9 | May | TC-MSG-115 | Covered |
 | FR-5.10 | May | TC-MSG-116 | Covered |
+| FR-5.11 | Should | TC-BAT-102, TC-BAT-104 | Covered |
+| FR-5b.1 | Must | TC-BAT-100 | Covered |
+| FR-5b.2 | Should | TC-BAT-100 (accuracy budget includes calibration) | Covered |
+| FR-5b.3 | Should | TC-BAT-100 (no jitter > 30 mV between consecutive samples) | Covered |
+| FR-5b.4 | Must | TC-BAT-100, TC-BAT-101 | Covered |
+| FR-5b.5 | Must | TC-BAT-103 | Covered |
+| FR-5b.6 | Should | TC-BAT-104 (defaults observed in fresh NVS) | Covered |
 | FR-6.1 | Must | TC-CP-100 | Covered |
 | FR-6.2 | Must | TC-CP-100 | Covered |
 | FR-6.3 | Must | ACC-001 (live panel updates verified during soak) | Covered |
@@ -904,7 +935,8 @@ Field semantics: see MySondy Go API v3.0 PDF (URL in §11). `BUZMUTE=-1` always 
 | `aprsName=<0|1>` | Persist | FR-5.7 |
 | `freqofs=<Hz>` | Persist + apply | FR-5.7 |
 | `<sonde>.rxbw=<idx>` | Apply RX BW per Appendix 2 | FR-5.8 |
-| `oled_*`, `led_pout`, `buz_pin`, `battery`, `lcd*`, `com`, `baud`, `vBat*` | Accept-and-ignore (echoed in `3`) | FR-5.9 |
+| `oled_*`, `led_pout`, `buz_pin`, `battery`, `lcd*`, `com`, `baud` | Accept-and-ignore (echoed in `3`) | FR-5.9 |
+| `vBatMin=<mV>`, `vBatMax=<mV>`, `vBatType=<0|1|2>` | Honored — persisted, used for `BAT%` calculation | FR-5.11 |
 | `sleep=<n>` | No-op + log | FR-5.10 |
 
 ### C. NVS schema
