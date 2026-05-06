@@ -1,6 +1,6 @@
-# MySondyGo-IDF — Functional Specification Document (FSD)
+# Balloon-Receiver — Functional Specification Document (FSD)
 
-**Working name:** MySondyGo-IDF
+**Repository:** [SensorsIot/Balloon-Receiver](https://github.com/SensorsIot/Balloon-Receiver)
 **Status:** Draft v0.1 (initial generation, 2026-05-06)
 **License:** GPL-2.0 (firmware contains derivative work of `rs1729/RS`)
 **Target hardware:** LILYGO® TTGO LoRa32 V2.1_1.6 (ESP32 + Semtech SX1276, 433 MHz, on-board SSD1306 OLED)
@@ -12,7 +12,7 @@
 
 ### 1.1 Purpose
 
-MySondyGo-IDF is a single-board, fixed-frequency radiosonde receiver. It demodulates and decodes a single Vaisala RS41 radiosonde transmission from a configured 433 MHz channel, and exposes the decoded telemetry to a smartphone via Bluetooth Low Energy using the MySondy Go API v3.0 ASCII protocol. A built-in web page allows the operator to configure the listen frequency and other settings over WiFi.
+Balloon-Receiver is a single-board, fixed-frequency radiosonde receiver. It demodulates and decodes a single Vaisala RS41 radiosonde transmission from a configured 433 MHz channel, and exposes the decoded telemetry to a smartphone via Bluetooth Low Energy using the MySondy Go API v3.0 ASCII protocol. A built-in web page allows the operator to configure the listen frequency and other settings over WiFi.
 
 ### 1.2 Problem Statement
 
@@ -971,7 +971,7 @@ Project-specific overrides: AP SSID format `MySondyGo-XXXX`, watchdog 60 s, heap
 
 ## 11. Related
 
-- [[MySondyGo-IDF Test Plan]] — detailed V&V procedures and benches (TBD).
-- [[MySondyGo-IDF BLE Cheatsheet]] — quick reference for the MySondy Go ASCII protocol (TBD).
-- [[kytrack-map-fsd]] — sibling project: Pi-side dxlAPRS-based gateway. MySondyGo-IDF is a complementary portable receiver.
+- [[Balloon-Receiver Test Plan]] — detailed V&V procedures and benches (TBD).
+- [[Balloon-Receiver BLE Cheatsheet]] — quick reference for the MySondy Go ASCII protocol (TBD).
+- [[kytrack-map-fsd]] — sibling project: Pi-side dxlAPRS-based gateway. Balloon-Receiver is a complementary portable receiver.
 - [[Claude_skill_fsd]] — meta-vault: skill specification driving FSD generation.
