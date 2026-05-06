@@ -367,7 +367,8 @@ Total cold boot to "device usable" target: ≤ 5 s (excluding WiFi STA associati
 #### Group 6 — Web UI / HTTP API
 
 - **FR-6.1** [Must]: The device shall serve a single-page HTML configuration UI at `GET /`.
-- **FR-6.2** [Must]: The UI shall provide form fields for: frequency (MHz), sonde type (dropdown), MYCALL, WiFi SSID, WiFi password, BLE on/off, **battery calibration** — `vBatMax` (mV, default 4200), `vBatMin` (mV, default 2950), `vBatType` (Linear / Sigmoidal / Anti-sigmoidal, default Sigmoidal). The UI shall display the current measured `BATV` next to the `vBatMax` field as a one-click "set to current full-charge reading" calibration helper.
+- **FR-6.2** [Must]: The UI shall provide form fields for: **board model** (dropdown — see Group 14), frequency (MHz), sonde type (dropdown), MYCALL, WiFi SSID, WiFi password, BLE on/off, **battery calibration** — `vBatMax` (mV, default 4200), `vBatMin` (mV, default 2950), `vBatType` (Linear / Sigmoidal / Anti-sigmoidal, default Sigmoidal). The UI shall display the current measured `BATV` next to the `vBatMax` field as a one-click "set to current full-charge reading" calibration helper.
+- **FR-6.2a** [Must]: The UI shall **not** expose individual GPIO pins for OLED, LED, buzzer, battery sense, or radio — those are fixed by the selected board profile (FR-14.x).
 - **FR-6.3** [Must]: The UI shall display a live status panel showing: state, decoded NAME, latitude, longitude, altitude, RSSI, battery voltage, firmware version. Live data shall refresh ≤ 2 s after each decoded frame.
 - **FR-6.4** [Must]: The device shall expose `GET /api/state` returning the current state and most recent decoded frame as JSON.
 - **FR-6.5** [Must]: The device shall expose `GET /api/config` returning the persisted configuration as JSON, with the WiFi password redacted (returned as `"***"` if set, `""` if unset).
@@ -422,6 +423,14 @@ Total cold boot to "device usable" target: ≤ 5 s (excluding WiFi STA associati
 - **FR-13.2** [Should]: A heap monitor shall log a warning when free heap drops below 32 KB and trigger a reboot below 8 KB.
 - **FR-13.3** [Must]: The watchdog shall not false-trigger during normal WiFi reconnection or OTA download.
 
+#### Group 14 — Board profile
+
+- **FR-14.1** [Must]: All hardware pin assignments (radio SPI, OLED I²C, LED, button, battery sense) shall be derived from a compile-time **board profile** identified at runtime by `board_id` in NVS. There shall be no individual-pin configuration via UI, BLE, or API.
+- **FR-14.2** [Must]: v1 shall ship a single board profile: `board_id = 0` → **LILYGO TTGO LoRa32 V2.1_1.6**. The architecture shall permit additional profiles to be added by appending entries to the profile table without modifying any other component.
+- **FR-14.3** [Should]: The active board profile's pin assignments shall populate the `OLED-SDA`, `OLED-SCL`, `OLED-RST`, `LED-PIN`, `BAT-PIN`, `BUZ-PIN` fields in the BLE settings reply (frame `3`) — so the MySondy Go app sees consistent values for the actual hardware in use.
+- **FR-14.4** [Must]: BLE pin-config commands (`oled_sda`, `oled_scl`, `oled_rst`, `led_pout`, `buz_pin`, `battery`) are accepted (per FR-5.9) but discarded — they shall not change the runtime pin map. This preserves protocol compatibility with the MySondy Go app while enforcing the board-profile model.
+- **FR-14.5** [May]: A future build may surface the board-profile dropdown for early prototyping/bring-up; in v1 the dropdown shows only `TTGO LoRa32 V2.1_1.6` (selected, locked).
+
 ### 4.2 Non-Functional Requirements (NFR)
 
 - **NFR-1.1** [Must]: BLE notification latency from decoded frame to NUS notification dispatched: ≤ 100 ms (95th percentile).
@@ -439,7 +448,7 @@ Total cold boot to "device usable" target: ≤ 5 s (excluding WiFi STA associati
 
 ### 4.3 Constraints
 
-- **C-1**: Hardware target is fixed at TTGO LoRa32 v2.1. Other boards (Heltec, v1, TBeam) are out of scope; if support is requested later, it is via a build variant.
+- **C-1**: Hardware target in v1 is fixed at TTGO LoRa32 V2.1_1.6 via the board profile mechanism (FR-14.x). Additional boards are added by appending profile entries; no individual-pin configuration is exposed.
 - **C-2**: Build system is ESP-IDF only. No Arduino-core compatibility shim.
 - **C-3**: BLE stack is NimBLE (not Bluedroid).
 - **C-4**: SX1276 is operated in raw FSK mode only. LoRa-mode operation is out of scope.
@@ -597,6 +606,7 @@ Event `CFG_EVT_CHANGED` carrying a bitmask of changed fields. Subscribers: RF dr
 
 ```json
 {
+  "board": "ttgo_lora32_v21_16",
   "freq_khz": 404600,
   "sonde_type": "RS41",
   "mycall": "MYCALL",
@@ -609,12 +619,15 @@ Event `CFG_EVT_CHANGED` carrying a bitmask of changed fields. Subscribers: RF dr
 }
 ```
 
+`board` is read-only in v1 (only one entry) but reserved for future expansion. POST-ing a different value returns 400.
+
 POST request omits `wifi_psk` to leave it unchanged; explicit empty string clears it.
 
 #### 6.3.3 NVS schema
 
 | Namespace | Key | Type | Default | Notes |
 |---|---|---|---|---|
+| `mysongo` | `board_id` | `u8` | `0` | 0 = TTGO LoRa32 V2.1_1.6; only entry in v1 |
 | `mysongo` | `freq_khz` | `u32` | `404000` | kHz, range 137200..524800 |
 | `mysongo` | `sonde_type` | `u8` | `1` (RS41) | 1=RS41, 2=M20, 3=M10, 4=PILOT, 5=DFM |
 | `mysongo` | `mycall` | `str[9]` | `"MYCALL"` | Max 8 chars + NUL |
@@ -749,7 +762,9 @@ See §10 Appendix B for the complete command/frame table. Honoured commands and 
 | TC-MSG-112 | Command `tipo=4` (PILOT no-op) | Send `o{tipo=4}o`. | Accepted, no crash, `0/PILOT/...` heartbeat. |
 | TC-MSG-113 | Command `re` | Send `o{re}o`. | Reboot within 5 s. |
 | TC-MSG-114 | Command `Re` | Send `o{Re}o`. | NVS erased + reboot; AP mode. |
-| TC-MSG-115 | Pin-config ignored | Send `o{oled_sda=99}o`. | Logged, frame 3 reports new value, but actual SDA pin unchanged. |
+| TC-MSG-115 | Pin-config ignored | Send `o{oled_sda=99}o`. | Logged; actual SDA pin unchanged; frame 3 still reports the active board profile's value (21), not the rejected 99. |
+| TC-BOARD-100 | Board profile drives pins | Boot fresh NVS. | OLED works (active board profile applied); frame 3 reports OLED-SDA=21, OLED-SCL=22, OLED-RST=16, LED-PIN=25, BAT-PIN=35. |
+| TC-BOARD-101 | UI shows no pin fields | Open `/`. | No form field for any GPIO pin; only the `board` dropdown appears for hardware selection. |
 | TC-MSG-116 | Sleep no-op | Send `o{sleep=10}o`. | Logged as no-op; device stays awake. |
 | TC-MSG-117 | rxbw applied | Send `o{rs41.rxbw=7}o`. | RX BW register reflects 12.5 kHz. |
 | TC-MSG-118 | Invalid envelope | Send `f=404.0` (no `o{}o`). | Ignored silently. |
@@ -849,6 +864,11 @@ See §10 Appendix B for the complete command/frame table. Honoured commands and 
 | FR-13.1 | Must | TC-WDT-100 | Covered |
 | FR-13.2 | Should | TC-WDT-102 | Covered |
 | FR-13.3 | Must | EC-WDT-201 | Covered |
+| FR-14.1 | Must | TC-BOARD-100, TC-BOARD-101 | Covered |
+| FR-14.2 | Must | TC-BOARD-100 | Covered |
+| FR-14.3 | Should | TC-BOARD-100 | Covered |
+| FR-14.4 | Must | TC-MSG-115 | Covered |
+| FR-14.5 | May | TC-BOARD-101 | Covered |
 | NFR-1.1 | Must | TC-BLE-103 | Covered |
 | NFR-1.2 | Should | ACC-001 (live panel timing observed) | Covered |
 | NFR-1.3 | Should | TC-DEC-101 | Covered |
