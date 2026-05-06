@@ -28,7 +28,7 @@ Buy the board, flash this firmware, attach a 433 MHz antenna, open the MySondy G
 - Tunes a single 433 MHz channel and decodes Vaisala **RS41** radiosondes.
 - Streams the decoded sonde data — name, latitude, longitude, altitude, horizontal/vertical velocity, signal strength — to a paired phone over Bluetooth Low Energy.
 - Speaks the **MySondy Go API v3.0** ASCII protocol, so the official MySondy Go Android app sees it as a regular MySondy Go device.
-- Serves a configuration web page over WiFi for setting frequency, callsign, WiFi credentials, and Bluetooth on/off.
+- Serves a configuration web page on its **own WiFi access point** for setting frequency, callsign, and Bluetooth on/off. The receiver never joins a home network — it is its own AP.
 - Saves all settings in flash; recovers gracefully from a wiped or corrupted config.
 - Updates its own firmware over WiFi (OTA) with automatic rollback if the new image fails to boot.
 
@@ -94,13 +94,13 @@ idf.py build
 idf.py -p /dev/ttyUSB0 flash monitor
 ```
 
-First boot with empty configuration: the device opens a WiFi access point named `MySondyGo-XXXX` (last 4 hex of its MAC). Connect a phone or laptop, browse to **http://192.168.4.1**, and the captive-portal page prompts for your home WiFi credentials and the listen frequency. Save → reboot → the device joins your home WiFi and starts decoding.
+On power-up the device opens an open WiFi access point named `MySondyGo-XXXX` (last 4 hex of its MAC). Connect a phone or laptop, browse to **http://192.168.4.1** (the captive portal redirects there automatically), and set the listen frequency, sonde type, and battery calibration. Save → done. The receiver does not join any other WiFi network.
 
 ## Configuration
 
 After provisioning, configuration is reachable two ways:
 
-- **Web page** at the device's STA IP (announced on the OLED).
+- **Web page** at `http://192.168.4.1` after joining the device's AP from your phone.
 - **MySondy Go Android app** — connect via Bluetooth and use the app's frequency/sonde-type controls. The device honours the API v3.0 commands documented at <https://download.farenight.it/MySondyGoAPI_V3.pdf>.
 
 Long-press the on-board button (≥ 5 s) to factory-reset and re-enter provisioning mode.

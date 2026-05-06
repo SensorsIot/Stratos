@@ -32,10 +32,10 @@ Existing open-source ESP32 radiosonde receivers (e.g. `dl9rdz/rdz_ttgo_sonde`) b
 **Goals (v1):**
 - Receive and decode a single RS41 radiosonde on a user-configured 433 MHz frequency.
 - Expose decoded telemetry to the MySondy Go Android app over BLE without modifications to the app.
-- Allow frequency, sonde type, and connectivity to be configured via a built-in web page.
+- Allow frequency and sonde type to be configured via a built-in web page served on the device's own WiFi access point. **No home WiFi network is involved.**
 - Persist configuration across power cycles and survive corruption gracefully.
 - Run reliably on USB power for at least 24 h without manual intervention.
-- Support firmware updates over WiFi.
+- Support firmware updates from GitHub via the operator's smartphone (browser-mediated upload over the AP).
 
 **Non-Goals (v1):**
 - Multi-channel frequency scanning or auto-search.
@@ -46,6 +46,8 @@ Existing open-source ESP32 radiosonde receivers (e.g. `dl9rdz/rdz_ttgo_sonde`) b
 - TFT display variants — SSD1306 OLED only.
 - A new mobile app — the existing MySondy Go app is the visualisation surface.
 - USB-CDC serial transport for the MySondy Go API (BLE only in v1).
+- **WiFi STA / home network connectivity** — the device is AP-only. It never joins a foreign WiFi network and stores no WiFi credentials.
+- **Receiver-initiated OTA** (no `esp_https_ota`, no embedded CA bundle, no GitHub fetch from device). All OTA goes through the operator's phone browser.
 
 ### 1.5 High-Level System Flow
 
@@ -97,11 +99,11 @@ The firmware is decomposed into the following logical subsystems:
 | **MySondy Go Codec** | Serialises state into `0/.../o`, `1/.../o`, `2/.../o`, `3/.../o` ASCII frames per API v3.0. Parses inbound `o{...}o` commands. |
 | **BLE Server** | Exposes the Nordic UART Service (NUS). Routes inbound writes to the codec and outbound notifications from the codec. |
 | **HTTP Server** | Serves the embedded HTML config page and JSON API endpoints. Backed by `esp_http_server`. |
-| **WiFi Manager** | Drives STA association; falls back to AP mode (captive portal) when no creds saved or STA fails to associate. |
-| **Config Store** | NVS-backed persistence layer for frequency, sonde type, MYCALL, WiFi creds, BLE on/off. |
+| **WiFi Manager** | Brings up an open WiFi access point at boot. AP only — never joins a foreign network. |
+| **Config Store** | NVS-backed persistence layer for frequency, sonde type, MYCALL, board, BLE on/off, battery calibration. |
 | **OLED UI** | Renders status (frequency, sonde type, signal, lock state, WiFi/BLE icons) on the SSD1306. |
 | **Button Handler** | Detects short press (OLED on/off) and long press (factory reset). |
-| **OTA Manager** | Handles `esp_https_ota` flow when triggered via HTTP or BLE. |
+| **OTA Manager** | Receives `firmware.bin` from `POST /api/ota/upload`, streams it into the inactive OTA partition, validates, reboots. No outbound HTTPS. |
 | **Watchdog & Logger** | Software task watchdog, hardware WDT, and structured logging via `ESP_LOG` (serial) plus optional UDP sink. |
 
 ### 2.2 Hardware / Platform Architecture
@@ -146,11 +148,11 @@ components/
 ├── mysondygo_codec/   ASCII codec for API v3.0 (in/out)
 ├── ble_nus/           NimBLE server exposing Nordic UART Service
 ├── http_ui/           esp_http_server: GET /, /api/state, /api/config, POST /api/config, POST /api/ota
-├── wifi_manager/      STA + AP fallback
+├── wifi_manager/      AP-only WiFi + captive-portal redirect
 ├── config_store/      NVS schema + accessors
 ├── oled_ui/           SSD1306 renderer
 ├── button/            Short-press / long-press detection
-├── ota/               esp_https_ota wrapper, version reporting
+├── ota/               POST /api/ota/upload handler, A/B partition writer, version reporting
 └── platform_common/   Logging, watchdog, build-version embedding
 main/
 └── app_main.c         Component init, task wiring
@@ -165,7 +167,7 @@ main/
 | `state_manager` | 4 KB | 8 | event-driven | Update state machine on each frame or 1-Hz tick. |
 | `ble_emit` | 4 KB | 7 | 1 Hz | Serialise current state to MySondyGo frame, notify NUS TX. |
 | `http_server` | 8 KB | 5 | request-driven | `esp_http_server` worker. |
-| `wifi_manager` | 4 KB | 6 | event-driven | Manage STA / AP transitions. |
+| `wifi_manager` | 4 KB | 6 | event-driven | Maintain AP, log client connect/disconnect events. |
 | `oled_ui` | 4 KB | 4 | 4 Hz | Refresh OLED. |
 | `button` | 2 KB | 4 | 50 Hz poll | Debounce + long-press detection. |
 | `watchdog` | 2 KB | 3 | 1 Hz | Feed task WDT, monitor heap, log health. |
@@ -175,19 +177,19 @@ All inter-task communication uses FreeRTOS queues and the ESP-IDF event loop (`e
 **Boot sequence:**
 
 1. `app_main` initialises NVS, reads config (defaults if empty/corrupt).
-2. WiFi manager starts: STA attempt with stored creds → 30 s timeout → AP fallback.
-3. HTTP server starts on the active interface (STA IP and/or 192.168.4.1).
+2. WiFi manager starts an open AP `MySondyGo-XXXX` on `192.168.4.1`.
+3. HTTP server starts on the AP interface.
 4. BLE stack initialises (NimBLE host + NUS service); advertising begins if `ble_on==true`.
 5. SX1276 driver initialises, configures FSK RX, sync word for active sonde type, frequency, RX BW.
 6. RS41 decoder task starts consuming `byte_queue`.
 7. State enters `NO_SIGNAL`; periodic frame `0` notifications begin.
 8. OLED, button, and watchdog tasks start last.
 
-Total cold boot to "device usable" target: ≤ 5 s (excluding WiFi STA association time which is environmental).
+Total cold boot to "device usable" target: ≤ 5 s.
 
 **Persistence:** ESP-IDF NVS (`nvs_flash`). Schema in §6.3. Defaults applied if any field is absent. Factory reset erases the entire `storage` namespace.
 
-**Update model:** `esp_https_ota` over WiFi STA. Dual A/B OTA partitions with rollback on boot failure (built-in ESP-IDF behaviour). Firmware version (semver `MAJOR.MINOR.PATCH` + git short SHA) compiled into the image and exposed via `VER` in BLE frames and `/api/state`.
+**Update model:** Browser-uploaded OTA via the device's AP. The operator's phone uses cellular to fetch the latest release `.bin` from GitHub, then uploads it to the receiver via `POST /api/ota/upload` over the AP. Dual A/B OTA partitions with rollback on boot failure (built-in ESP-IDF behaviour). The receiver itself never makes outbound HTTPS requests, so no CA bundle is needed. Firmware version (semver `MAJOR.MINOR.PATCH` + git short SHA) is compiled into the image and exposed via `VER` in BLE frames and `/api/version`.
 
 ---
 
@@ -198,7 +200,7 @@ Total cold boot to "device usable" target: ≤ 5 s (excluding WiFi STA associati
 **Scope:**
 - ESP-IDF skeleton, component layout, build green.
 - NVS schema and accessors.
-- WiFi manager (STA + AP fallback) with hard-coded test credentials.
+- WiFi manager — open AP only at `192.168.4.1`, captive-portal redirect.
 - HTTP server with placeholder `/` and JSON endpoints returning stub data.
 - OLED driver showing boot banner and connection status.
 - Button handler with short/long-press detection wired to GPIO0.
@@ -211,7 +213,7 @@ Total cold boot to "device usable" target: ≤ 5 s (excluding WiFi STA associati
 
 **Exit criteria:**
 - TC-NVS-100, TC-NVS-101, TC-CP-100, TC-WDT-100, TC-LOG-100 all pass on real hardware.
-- Cold boot to web UI reachable in ≤ 30 s with valid creds, ≤ 60 s on AP fallback path.
+- Cold boot to AP reachable and web UI loaded in ≤ 5 s.
 
 **Dependencies:** None (greenfield).
 
@@ -281,9 +283,9 @@ Total cold boot to "device usable" target: ≤ 5 s (excluding WiFi STA associati
 ### 3.5 Phase 5 — OTA, hardening, V&V
 
 **Scope:**
-- `esp_https_ota` integration.
+- Browser-uploaded OTA: `POST /api/ota/upload`, A/B partition writer.
 - Version embedding (build-time `MAJOR.MINOR.PATCH+SHA`).
-- POST `/api/ota` endpoint and BLE OTA trigger command.
+- Web UI "Update from GitHub" panel querying `api.github.com` from the browser.
 - Boot rollback on bad firmware (validated by intentional bad image).
 - Watchdog tuning to not false-trigger during OTA.
 - Full V&V campaign — every Must / Should requirement covered (see §8.4).
@@ -367,22 +369,22 @@ Total cold boot to "device usable" target: ≤ 5 s (excluding WiFi STA associati
 #### Group 6 — Web UI / HTTP API
 
 - **FR-6.1** [Must]: The device shall serve a single-page HTML configuration UI at `GET /`.
-- **FR-6.2** [Must]: The UI shall provide form fields for: **board model** (dropdown — see Group 14), frequency (MHz), sonde type (dropdown), MYCALL, WiFi SSID, WiFi password, BLE on/off, **battery calibration** — `vBatMax` (mV, default 4200), `vBatMin` (mV, default 2950), `vBatType` (Linear / Sigmoidal / Anti-sigmoidal, default Sigmoidal). The UI shall display the current measured `BATV` next to the `vBatMax` field as a one-click "set to current full-charge reading" calibration helper.
+- **FR-6.2** [Must]: The UI shall provide form fields for: **board model** (dropdown — see Group 14), frequency (MHz), sonde type (dropdown), MYCALL, BLE on/off, **battery calibration** — `vBatMax` (mV, default 4200), `vBatMin` (mV, default 2950), `vBatType` (Linear / Sigmoidal / Anti-sigmoidal, default Sigmoidal). The UI shall display the current measured `BATV` next to the `vBatMax` field as a one-click "set to current full-charge reading" calibration helper. **No WiFi credential fields** are present (the device is AP-only — see FR-7.x).
 - **FR-6.2a** [Must]: The UI shall **not** expose individual GPIO pins for OLED, LED, buzzer, battery sense, or radio — those are fixed by the selected board profile (FR-14.x).
 - **FR-6.3** [Must]: The UI shall display a live status panel showing: state, decoded NAME, latitude, longitude, altitude, RSSI, battery voltage, firmware version. Live data shall refresh ≤ 2 s after each decoded frame.
 - **FR-6.4** [Must]: The device shall expose `GET /api/state` returning the current state and most recent decoded frame as JSON.
 - **FR-6.5** [Must]: The device shall expose `GET /api/config` returning the persisted configuration as JSON, with the WiFi password redacted (returned as `"***"` if set, `""` if unset).
 - **FR-6.6** [Must]: The device shall expose `POST /api/config` accepting a JSON body matching the config schema, validating fields, persisting on success, and returning 400 with a problem description on failure.
-- **FR-6.7** [Should]: The device shall expose `POST /api/ota/upload` (browser-uploaded path) and `POST /api/ota/pull` (receiver-pulled path) per FR-11.x. The HTML UI shall present both as appropriate to the current connectivity mode (`upload` always, `pull` only when STA-connected with internet).
+- **FR-6.7** [Should]: The device shall expose `POST /api/ota/upload` and `GET /api/ota/progress` per FR-11.x. The HTML UI shall provide both a "Update from GitHub" button (browser fetches latest release, then uploads) and a "Upload local file" file-picker for sideloading.
 - **FR-6.8** [Should]: The HTML/JS payload shall be embedded in the firmware via `EMBED_TXTFILES` (no SPIFFS / LittleFS).
 
-#### Group 7 — WiFi
+#### Group 7 — WiFi (AP-only)
 
-- **FR-7.1** [Must]: The device shall attempt STA association with stored credentials at boot.
-- **FR-7.2** [Must]: If STA association fails or no credentials are stored, the device shall start an open AP named `MySondyGo-XXXX` (last 4 hex of MAC) on 192.168.4.1 within 30 s.
-- **FR-7.3** [Must]: The captive portal shall serve the same HTML config page as `GET /`.
-- **FR-7.4** [Should]: The device shall support concurrent STA + AP (AP-while-STA-active for diagnostics) when explicitly enabled by long-pressing the button while STA is connected (deferred to v1.1; not in v1 scope).
-- **FR-7.5** [Must]: WiFi credentials shall be stored encrypted in NVS (see NVS-010).
+- **FR-7.1** [Must]: The device shall start a WiFi access point at boot named `MySondyGo-XXXX` (last 4 hex of the WiFi MAC) on 802.11 b/g/n channel 6 by default.
+- **FR-7.2** [Must]: The AP shall be reachable at IP `192.168.4.1` and assign clients via DHCP from the `192.168.4.0/24` range.
+- **FR-7.3** [Must]: The AP shall be **open** (no password) in v1, matching the MySondy Go device behaviour for ease of field operation.
+- **FR-7.4** [Must]: The device shall **never** join a foreign WiFi network as STA. No SSID/PSK are stored or accepted.
+- **FR-7.5** [Should]: A captive-portal redirect (DNS hijack + 302) shall direct any HTTP request on the AP to `http://192.168.4.1/` so phones automatically open the configuration page on connect.
 
 #### Group 8 — Persistence
 
@@ -394,7 +396,7 @@ Total cold boot to "device usable" target: ≤ 5 s (excluding WiFi STA associati
 #### Group 9 — OLED display
 
 - **FR-9.1** [Must]: The OLED shall show, while powered: frequency, sonde type, lock state, RSSI bar.
-- **FR-9.2** [Should]: The OLED shall show WiFi state (AP / STA-connected / STA-disconnected) and BLE state (advertising / connected) icons.
+- **FR-9.2** [Should]: The OLED shall show AP-client-count (0..N) and BLE state (advertising / connected) icons.
 - **FR-9.3** [Should]: The OLED shall show decoded NAME and altitude when in `TRACKING`.
 - **FR-9.4** [Should]: A short button press shall toggle OLED on/off; the OLED shall remember its last state across reboots.
 
@@ -404,36 +406,22 @@ Total cold boot to "device usable" target: ≤ 5 s (excluding WiFi STA associati
 - **FR-10.2** [Must]: A long press (≥ 5 s) shall trigger factory reset.
 - **FR-10.3** [Should]: Press detection shall be debounced (50 ms minimum stable signal).
 
-#### Group 11 — OTA
+#### Group 11 — OTA (browser-uploaded only)
 
-The firmware shall support **two OTA paths** to handle both connected and field-only scenarios:
-
-##### 11a — Browser-uploaded OTA (field path, AP-only)
-
-This path works when the receiver has no internet (AP-only mode) but the operator's phone does (cellular). The phone fetches the `.bin` from GitHub via cellular and uploads it to the receiver over the AP.
+The receiver never makes outbound HTTPS requests. All OTA goes through the operator's phone browser, which has cellular for GitHub access while simultaneously connected to the receiver's AP.
 
 - **FR-11.1** [Must]: The device shall expose `POST /api/ota/upload` accepting a multipart upload of a single `firmware.bin` file. The receiver shall stream the body directly into the inactive OTA partition without buffering the entire image in RAM.
-- **FR-11.2** [Must]: The web UI shall provide a single "Update firmware" panel that:
+- **FR-11.2** [Must]: The web UI shall provide an "Update firmware" panel that:
   1. Queries GitHub's Releases API (`https://api.github.com/repos/SensorsIot/Balloon-Receiver/releases/latest`) **from the browser** to discover the latest release tag and asset URL.
   2. Downloads the `.bin` asset from `*.githubusercontent.com` **in the browser**.
   3. POSTs the downloaded bytes to `/api/ota/upload`.
   4. Displays progress for both download and upload phases.
-- **FR-11.3** [Must]: All GitHub API and asset traffic shall happen **in the browser** (the phone), never in the receiver. The receiver does not need internet for this path to work.
-
-##### 11b — Receiver-pulled OTA (desk path, STA online)
-
-This path is a convenience when the receiver is on a WiFi network with internet.
-
-- **FR-11.4** [Should]: The device shall expose `POST /api/ota/pull` (no body required) which causes the receiver itself to query GitHub Releases and run `esp_https_ota` against the latest asset URL. Returns 503 if the receiver is in AP-only mode.
-- **FR-11.5** [Should]: The receiver shall ship with a CA bundle covering `*.github.com` and `*.githubusercontent.com` issuers (DigiCert root, Let's Encrypt root). The bundle shall be embedded via `EMBED_TXTFILES`.
-- **FR-11.6** [May]: The receiver-pulled path shall also accept an explicit `{"url": "https://..."}` body to override the GitHub-default source — useful for staging builds.
-
-##### 11c — Common OTA properties
-
-- **FR-11.7** [Must]: The device shall use **dual A/B OTA partitions** with automatic rollback on boot failure (built-in ESP-IDF behaviour).
-- **FR-11.8** [Must]: The device shall reject firmware images whose ESP-IDF image header does not match this project's chip target.
-- **FR-11.9** [Should]: The device shall report OTA progress (started / N % / complete / error) via `ESP_LOG`, the BLE TX channel, and (for path 11a) a SSE stream on `GET /api/ota/progress` so the web UI can render a progress bar.
-- **FR-11.10** [Must]: After a successful OTA, the device shall reboot automatically into the new image and report the new version in the next `?`-reply (frame `3`) and `GET /api/version`.
+- **FR-11.3** [Must]: All GitHub API and asset traffic shall happen **in the browser** (the phone), never in the receiver. The receiver does not have or need internet.
+- **FR-11.4** [Must]: The device shall use **dual A/B OTA partitions** with automatic rollback on boot failure (built-in ESP-IDF behaviour).
+- **FR-11.5** [Must]: The device shall reject firmware images whose ESP-IDF image header does not match this project's chip target.
+- **FR-11.6** [Should]: The device shall expose `GET /api/ota/progress` as a Server-Sent Events stream emitting `start`, `progress {pct}`, `complete`, and `error {msg}` events so the browser can render a progress bar during the upload phase.
+- **FR-11.7** [Must]: After a successful OTA, the device shall reboot automatically into the new image and report the new version in the next `?`-reply (frame `3`) and `GET /api/version`.
+- **FR-11.8** [Should]: The web UI shall allow the operator to manually upload a `.bin` from the phone's local storage (file-picker), bypassing the GitHub fetch step — useful for sideloading staging builds without internet.
 
 #### Group 12 — Logging & diagnostics
 
@@ -494,8 +482,8 @@ This path is a convenience when the receiver is on a WiFi network with internet.
 | **R-4** BLE + WiFi coexistence on shared 2.4 GHz radio. | Low | Medium | Standard ESP32 dual-mode is well supported; allocate one dedicated soak test in Phase 5 (NFR-2.1). |
 | **R-5** No real sonde available for testing during dry seasons / non-launch windows. | Medium | Medium | Record I/Q with rtl-sdr during a launch window; replay through the SX1276 via attenuator and dummy-load coupling, or via a second SX1276 in TX mode (test rig only — not the production firmware). |
 | **R-6** Flash / RAM pressure when adding NimBLE + WiFi + httpd + OLED + decoder. | Low | Medium | Budget early (target build ≤ 70 % of 4 MB flash, ≤ 60 % of 320 KB heap at idle). Profile in Phase 1. |
-| **R-7** GitHub TLS chain rotation breaks receiver-pulled OTA. GitHub may rotate intermediate CA certs faster than the embedded CA bundle is updated. | Medium | Low (browser-uploaded path is unaffected) | Embed root CAs only (longer-lived) and configure `esp_https_ota` to validate via root. The browser-uploaded path (FR-11.1..3) is the canonical field path and bypasses this risk entirely. |
-| **R-8** GitHub Releases API CORS for browser-side fetch. The browser must be able to read `api.github.com` JSON cross-origin from the receiver's `192.168.4.1` page. | Low | Low | `api.github.com` sets `Access-Control-Allow-Origin: *` for unauthenticated GET requests on public repos — verified at design time. |
+| **R-7** GitHub Releases API CORS for browser-side fetch. The browser must be able to read `api.github.com` JSON cross-origin from the receiver's `192.168.4.1` page. | Low | Low | `api.github.com` sets `Access-Control-Allow-Origin: *` for unauthenticated GET requests on public repos — verified at design time. |
+| **R-8** Browser may refuse to download `.bin` from `*.githubusercontent.com` and POST to `192.168.4.1` (mixed-content / private-network access policies on Chrome and Safari). | Medium | Medium | Test with current Chrome and Safari versions in Phase 5. Mitigation if blocked: use a small tag-redirect endpoint on the receiver (still no outbound traffic — receiver just returns the URL the browser already has) or fall back to file-picker sideload (FR-11.8). |
 
 ### 5.2 Assumptions
 
@@ -503,7 +491,7 @@ This path is a convenience when the receiver is on a WiFi network with internet.
 - (assumed) **Default frequency**: 404.000 MHz (per MySondy Go API default) — common-launch frequency in central Europe; user adjusts for their region.
 - (assumed) **`rs41.rxbw` and other `*.rxbw` commands take effect**: these are RF parameters (not pin config), so they are honoured rather than ignored. Default values match MySondy Go API Appendix 2 defaults.
 - (assumed) **`sleep` command is a no-op in v1** (logged for debug); deep-sleep is out of scope. May be implemented in v1.1 if battery use becomes a goal.
-- (assumed) **BLE pairing**: "Just Works" (no static passkey, no MITM protection). Acceptable because the device contains no credentials worth pairing-protecting (WiFi creds are accessible only via local web UI / serial).
+- (assumed) **BLE pairing**: "Just Works" (no static passkey, no MITM protection). Acceptable because the device stores no secrets — there are no WiFi credentials, no API tokens, no user data.
 - (assumed) **`PILOT` (tipo=4)** is accepted and stored, but no decoder runs in v1 — state remains `NO_SIGNAL`. The user may select PILOT and the device will not crash, simply not produce frames `1` or `2`.
 - (assumed) **Logging UDP target** is unset by default; serial-only logging is the baseline.
 - (assumed) **OTA signing** is OFF by default in v1 (image header validation only). Signed-OTA is a v1.1 hardening item.
@@ -514,7 +502,7 @@ This path is a convenience when the receiver is on a WiFi network with internet.
 
 - ESP-IDF (latest stable) — Espressif official toolchain.
 - NimBLE host stack (`esp-nimble-cpp` or vanilla `esp_nimble` — vanilla preferred).
-- `esp_http_server`, `esp_wifi`, `nvs_flash`, `esp_https_ota` — all part of ESP-IDF.
+- `esp_http_server`, `esp_wifi` (SoftAP only), `nvs_flash`, `esp_ota_ops` — all part of ESP-IDF.
 - `rs1729/RS` — GPL-2.0 reference decoder source (vendored, not submodule, at a pinned commit).
 - MySondy Go Android app (closed source, Play Store) — not modified, used as conformance peer.
 
@@ -560,7 +548,6 @@ The protocol on top of the NUS byte stream conforms to MySondy Go API v3.0. Outp
 | `/api/config` | POST | Update configuration | JSON body (§6.3.2); 200 OK on success, 400 + problem JSON on failure |
 | `/api/factory-reset` | POST | Trigger factory reset + reboot | empty body; 202 Accepted then reboot |
 | `/api/ota/upload` | POST | Browser-uploaded OTA (multipart `firmware.bin`) | 202 Accepted; receiver streams body to OTA partition. |
-| `/api/ota/pull` | POST | Receiver-pulled OTA from GitHub Releases | empty body for default (latest GitHub release); `{"url":"..."}` to override. 503 if no internet. |
 | `/api/ota/progress` | GET | OTA progress stream (Server-Sent Events) | text/event-stream; events `start`, `progress {pct}`, `complete`, `error {msg}`. |
 | `/api/version` | GET | Firmware build info | `{"version": "1.0.0+abcdef1", "idf": "5.x", "github_repo": "SensorsIot/Balloon-Receiver"}` |
 
@@ -638,8 +625,6 @@ Event `CFG_EVT_CHANGED` carrying a bitmask of changed fields. Subscribers: RF dr
   "freq_khz": 404600,
   "sonde_type": "RS41",
   "mycall": "MYCALL",
-  "wifi_ssid": "homeap",
-  "wifi_psk": "***",
   "ble_on": true,
   "vbat_min_mv": 2950,
   "vbat_max_mv": 4200,
@@ -649,7 +634,6 @@ Event `CFG_EVT_CHANGED` carrying a bitmask of changed fields. Subscribers: RF dr
 
 `board` is read-only in v1 (only one entry) but reserved for future expansion. POST-ing a different value returns 400.
 
-POST request omits `wifi_psk` to leave it unchanged; explicit empty string clears it.
 
 #### 6.3.3 NVS schema
 
@@ -659,8 +643,6 @@ POST request omits `wifi_psk` to leave it unchanged; explicit empty string clear
 | `mysongo` | `freq_khz` | `u32` | `404000` | kHz, range 137200..524800 |
 | `mysongo` | `sonde_type` | `u8` | `1` (RS41) | 1=RS41, 2=M20, 3=M10, 4=PILOT, 5=DFM |
 | `mysongo` | `mycall` | `str[9]` | `"MYCALL"` | Max 8 chars + NUL |
-| `mysongo` | `wifi_ssid` | `str[33]` | `""` | Max 32 chars |
-| `mysongo` | `wifi_psk` | `str[65]` | `""` | Max 64 chars |
 | `mysongo` | `ble_on` | `u8` | `1` | 0/1 |
 | `mysongo` | `oled_persist` | `u8` | `1` | OLED last on/off state |
 | `mysongo` | `freqofs_hz` | `i32` | `0` | Per-radio offset (MySondy `freqofs`) |
@@ -701,20 +683,22 @@ See §10 Appendix B for the complete command/frame table. Honoured commands and 
 3. Hold `BOOT` (GPIO0) and tap `EN` (RESET) if the board does not auto-enter download mode (CP210x with autoreset usually does).
 4. First-boot output: NVS empty → defaults applied → AP `MySondyGo-XXXX` starts.
 
-### 7.2 Provisioning
+### 7.2 First-time setup
 
-1. On a phone or laptop, join the WiFi network `MySondyGo-XXXX` (open, no password).
-2. Browser opens captive portal automatically; if not, navigate to `http://192.168.4.1`.
-3. Enter home WiFi SSID + password, choose sonde type (RS41) and frequency, set MYCALL.
-4. Click "Save & Reboot". The device reboots, joins the home WiFi, and serves the same UI on the assigned LAN IP (announced via OLED).
+1. Power the device.
+2. On a phone, join the open WiFi network `MySondyGo-XXXX`.
+3. Browser opens the configuration page automatically (captive-portal redirect); if not, navigate to `http://192.168.4.1`.
+4. Pick frequency and sonde type, set MYCALL, optionally calibrate the battery, click Save.
+5. Done — there is no "join home WiFi" step. The device stays on its own AP forever.
 
 ### 7.3 Field operation (normal)
 
 1. Power the device (USB or battery).
 2. Open the MySondy Go Android app on the phone.
-3. Scan and connect to `MySondyGo-XXXX`.
+3. Scan and connect to `MySondyGo-XXXX` over Bluetooth.
 4. App shows live decoded data. Frequency and sonde-type changes from the app are honoured.
 5. OLED mirrors the same data (when on; toggle with short press).
+6. To change settings without the app, the phone can also join the device's WiFi AP and use the web page in parallel.
 
 ### 7.4 Configuration update workflows
 
@@ -727,30 +711,24 @@ See §10 Appendix B for the complete command/frame table. Honoured commands and 
 
 ### 7.5 OTA firmware update
 
-Two flows are supported.
-
-**Field flow (phone on receiver AP, no receiver internet):**
+The receiver has no internet — the phone does the GitHub fetch.
 
 1. On the phone, ensure cellular data is on.
 2. Connect the phone to the receiver's AP `MySondyGo-XXXX`.
 3. Open `http://192.168.4.1` in the phone's browser.
-4. Click "Update firmware". The browser:
+4. Click "Update from GitHub". The browser:
    - Queries `https://api.github.com/repos/SensorsIot/Balloon-Receiver/releases/latest` over cellular.
    - Downloads the `.bin` from the asset URL over cellular.
    - Uploads it to the receiver via the AP.
 5. The receiver writes to the inactive OTA slot, verifies the image header, and reboots. If the new image fails to boot, A/B rollback automatically restores the previous image.
 
-**Desk flow (receiver on home WiFi):**
-
-1. Open the receiver's web page on its STA IP.
-2. Click "Check for update". The receiver itself fetches the latest release from GitHub via `esp_https_ota` and applies it.
-3. Same A/B rollback behaviour as above.
+For sideloading without internet, the same UI offers a "Upload local file" file-picker that takes a `.bin` from the phone's storage.
 
 ### 7.6 Recovery procedures
 
 | Scenario | Action |
 |---|---|
-| WiFi creds wrong / network changed | Long-press button → factory reset → re-provision via AP. |
+| Settings stuck or corrupted | Long-press button → factory reset → reconfigure via AP. |
 | Device unresponsive | Power-cycle. If still unresponsive after 60 s of boot, hold button during reset → flash recovery firmware via USB. |
 | Bad OTA image | Automatic rollback to previous image via A/B partition. No user action needed. |
 | Forgot configured frequency | Read OLED, or query `GET /api/config`. |
@@ -767,7 +745,7 @@ Two flows are supported.
 | TC-NVS-101 | Defaults on first boot | Erase NVS, boot. | Device enters AP mode with default freq=404.000 MHz. |
 | TC-NVS-102 | Factory reset via button | Configure, hold button 5 s. | NVS cleared, AP mode resumes. |
 | TC-NVS-103 | Factory reset via command | Send `o{Re}o` over BLE. | Same as button reset. |
-| TC-CP-100 | Captive portal first boot | Empty NVS → join AP → browse. | Portal serves HTML; saving reboots into STA. |
+| TC-CP-100 | Captive portal first boot | Empty NVS → join AP → browse. | Portal serves HTML on `192.168.4.1`; settings save survives reboot; AP remains active. |
 | TC-CP-101 | Captive portal via button | Long-press while running. | Factory reset triggers — captive portal re-appears post-reboot. |
 | TC-WDT-100 | Software watchdog | Force a task hang in test build. | Reboot within 90 s; reset reason = watchdog. |
 | TC-WDT-102 | Heap monitor | Allocate until heap below threshold. | Warning at 32 KB, reboot at 8 KB. |
@@ -827,12 +805,12 @@ Two flows are supported.
 | ACC-001 | 24 h soak, BLE+WiFi+RS41 active | Free heap drift ≤ 5 %, no reboots, no decoded-frame loss > 5 %. |
 | ACC-002 | Field acquisition | Real launch within 100 km. Lock acquired ≤ 60 s after sonde rises above local horizon. |
 | ACC-003 | OTA round-trip | Update from v1.0.0 → v1.0.1 → bad image → automatic rollback. |
-| TC-OTA-100 | Successful OTA — pull path | `POST /api/ota/pull` (receiver online). | Latest GitHub release applied; new version in next BLE frame. |
-| TC-OTA-101 | OTA rollback | Push intentionally-broken image via either path. | Auto-rollback within 2 boot attempts. |
+| TC-OTA-100 | Successful OTA — browser upload path | Phone with cellular on receiver AP; click "Update from GitHub" in web UI. Phone fetches latest release from GitHub, uploads via `POST /api/ota/upload`. | Update applies; new version reported on reboot. |
+| TC-OTA-101 | OTA rollback | Upload intentionally-broken image. | Auto-rollback within 2 boot attempts. |
 | TC-OTA-102 | Version reporting | `GET /api/version` and BLE `?` response. | Same version string in both. |
-| TC-OTA-103 | Successful OTA — browser upload path | Phone with cellular on receiver AP; click "Update firmware" in web UI. Phone fetches latest release from GitHub, uploads via `POST /api/ota/upload`. | Update applies; new version reported on reboot. |
-| TC-OTA-104 | Pull-path 503 in AP-only mode | Disconnect receiver from STA so it falls back to AP. `POST /api/ota/pull`. | 503 returned; logged; no OTA attempted. |
-| TC-OTA-105 | Progress SSE | Subscribe to `GET /api/ota/progress`. Trigger any OTA. | `start`, ≥ 5 `progress` events, `complete` (or `error`). |
+| TC-OTA-103 | Local file sideload | Use "Upload local file" picker with a stashed `.bin`. | Update applies same as TC-OTA-100. |
+| TC-OTA-104 | Progress SSE | Subscribe to `GET /api/ota/progress`. Trigger any OTA. | `start`, ≥ 5 `progress` events, `complete` (or `error`). |
+| TC-OTA-105 | No outbound HTTPS | Capture all packets from receiver during OTA. | Zero packets to anything but the connected AP client. The receiver makes no outbound DNS or TLS. |
 
 ### 8.5 Traceability Matrix
 
@@ -884,11 +862,11 @@ Two flows are supported.
 | FR-6.6 | Must | TC-CP-100 | Covered |
 | FR-6.7 | Should | TC-OTA-100 | Covered |
 | FR-6.8 | Should | Build artefact inspection (single binary, no SPIFFS partition) | Covered (build check) |
-| FR-7.1 | Must | TC-NVS-100 (after reboot, STA join) | Covered |
-| FR-7.2 | Must | TC-CP-100 | Covered |
-| FR-7.3 | Must | TC-CP-100 | Covered |
-| FR-7.4 | Should | GAP — deferred to v1.1 |
-| FR-7.5 | Must | EC-NVS-203 | Covered |
+| FR-7.1 | Must | TC-CP-100 (AP visible at boot) | Covered |
+| FR-7.2 | Must | TC-CP-100 (DHCP from 192.168.4.0/24) | Covered |
+| FR-7.3 | Must | TC-CP-100 (open AP, no PSK) | Covered |
+| FR-7.4 | Must | TC-OTA-105 (no outbound traffic — proves no STA) | Covered |
+| FR-7.5 | Should | TC-CP-100 (captive portal redirect) | Covered |
 | FR-8.1 | Must | TC-NVS-100 | Covered |
 | FR-8.2 | Must | TC-NVS-101, EC-NVS-200 | Covered |
 | FR-8.3 | Must | TC-NVS-102 | Covered |
@@ -900,16 +878,14 @@ Two flows are supported.
 | FR-10.1 | Must | TC-OLED-101 | Covered |
 | FR-10.2 | Must | TC-NVS-102 | Covered |
 | FR-10.3 | Should | TC-OLED-101 | Covered |
-| FR-11.1 | Must | TC-OTA-103 | Covered |
-| FR-11.2 | Must | TC-OTA-103 | Covered |
-| FR-11.3 | Must | TC-OTA-103 (no receiver internet during upload phase verifiable via firewall) | Covered |
-| FR-11.4 | Should | TC-OTA-100, TC-OTA-104 | Covered |
-| FR-11.5 | Should | TC-OTA-100 (CA chain validates GitHub) | Covered |
-| FR-11.6 | May | TC-OTA-100 (variant with explicit URL) | Covered |
-| FR-11.7 | Must | TC-OTA-101, EC-OTA-201 | Covered |
-| FR-11.8 | Must | EC-OTA-202 | Covered |
-| FR-11.9 | Should | TC-OTA-105 | Covered |
-| FR-11.10 | Must | TC-OTA-100, TC-OTA-103, TC-OTA-102 | Covered |
+| FR-11.1 | Must | TC-OTA-100 | Covered |
+| FR-11.2 | Must | TC-OTA-100 | Covered |
+| FR-11.3 | Must | TC-OTA-105 | Covered |
+| FR-11.4 | Must | TC-OTA-101, EC-OTA-201 | Covered |
+| FR-11.5 | Must | EC-OTA-202 | Covered |
+| FR-11.6 | Should | TC-OTA-104 | Covered |
+| FR-11.7 | Must | TC-OTA-100, TC-OTA-102 | Covered |
+| FR-11.8 | Should | TC-OTA-103 | Covered |
 | FR-12.1 | Must | TC-LOG-100 | Covered |
 | FR-12.2 | Should | TC-LOG-101 | Covered |
 | FR-12.3 | Must | EC-NVS-203 | Covered |
@@ -939,7 +915,7 @@ OLED tests (TC-OLED-100, TC-OLED-101) are defined inline:
 - **TC-OLED-100** — Power on. OLED shows boot banner → status page within 5 s. Status page contains: frequency, sonde type, lock state, RSSI bar, WiFi/BLE icons. When in TRACKING, NAME and altitude are visible.
 - **TC-OLED-101** — While running, short-press button. OLED toggles off. Press again — toggles on. Reboot — OLED state restored from NVS.
 
-Open gaps: FR-7.4 (concurrent STA+AP) — deferred to v1.1.
+No open gaps in v1.
 
 ---
 
@@ -947,7 +923,7 @@ Open gaps: FR-7.4 (concurrent STA+AP) — deferred to v1.1.
 
 | Symptom | Likely Cause | Diagnostic Steps | Corrective Action |
 |---|---|---|---|
-| Device boots but no AP and no STA | NVS corrupt | Check serial log for "NVS init" | Power-cycle. If persists, long-press button → factory reset. |
+| Device boots but no AP visible | WiFi init failed or NVS corrupt | Check serial log for "NVS init" or "esp_wifi_start" errors | Power-cycle. If persists, long-press button → factory reset. |
 | AP visible but portal does not load | Browser caching old captive portal | Open `http://192.168.4.1` directly | Clear browser cache; use private window. |
 | WiFi joins but `/api/state` 404 | HTTP server task crash | Serial log for httpd errors | Reboot. If recurring, check heap via `/api/version` (extended diagnostic). |
 | MySondy Go app cannot find device | BLE off or wrong UUID | Enable BLE in `/api/config`; verify UUIDs in nRF Connect | Toggle BLE on; if UUIDs differ from app expectation, see R-1. |
@@ -969,7 +945,7 @@ Open gaps: FR-7.4 (concurrent STA+AP) — deferred to v1.1.
 |---|---|
 | AP fallback SSID prefix | `MySondyGo-` |
 | AP IP | `192.168.4.1` |
-| WiFi STA association timeout | 30 s |
+| AP startup timeout | 5 s |
 | Default frequency | 404.000 MHz |
 | Default sonde type | RS41 |
 | Default MYCALL | `MYCALL` |
@@ -1061,8 +1037,7 @@ When `NO_SIGNAL`: replace decode rows with `── searching ──` plus rotati
 
 This FSD activates the following standard ESP-IDF test specs from the FSD-writer skill:
 
-- WiFi STA — WIFI-001..005, EC-100, EC-101, EC-110, EC-111, EC-115
-- Captive Portal — AP-001..006, CP-001..006, TC-CP-100..102
+- Captive Portal — AP-001..006, CP-001..006, TC-CP-100..102 (AP-only — no STA handover)
 - BLE & NUS — BLE-001..006, BLE-010..013, BLE-020..023, BLE-030..032, TC-BLE-100..103, EC-BLE-200..204
 - OTA — OTA-001..013, TC-OTA-100..102, EC-OTA-200..204
 - NVS — NVS-001..024, TC-NVS-100..103, EC-NVS-200..204
