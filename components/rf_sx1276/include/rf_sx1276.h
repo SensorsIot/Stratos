@@ -27,6 +27,8 @@ esp_err_t   st_rf_apply_profile(const rf_profile_t *p);
 esp_err_t   st_rf_start_rx(void);
 esp_err_t   st_rf_stop(void);
 int16_t     st_rf_rssi_dbm(void);
+uint32_t    st_rf_byte_count(void);   /* total bytes drained from FIFO since boot */
+uint32_t    st_rf_sync_count(void);   /* total observed SyncAddressMatch events since boot */
 QueueHandle_t st_rf_byte_queue(void);
 
 const rf_profile_t *st_rf_profile_for(sonde_type_t t);

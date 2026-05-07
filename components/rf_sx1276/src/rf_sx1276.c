@@ -4,6 +4,7 @@
 
 #include "esp_log.h"
 #include "esp_check.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -25,6 +26,8 @@ static QueueHandle_t       s_bytes;
 static SemaphoreHandle_t   s_irq_sem;
 static int16_t             s_rssi_dbm = 0;
 static rf_profile_t        s_active_profile;
+static volatile uint32_t   s_byte_count;       /* total bytes drained from FIFO since boot */
+static volatile uint32_t   s_sync_count;       /* increments each time IrqFlags1 SyncAddressMatch is observed set */
 
 /* RS41 sync word baseline below is from the rs1729 reference. Phase 2 bench
    tuning will confirm/refine — see FSD §6.3.4 and §5 R-2. */
@@ -132,26 +135,62 @@ static void rx_task(void *arg)
     (void)arg;
     /* On FifoLevel IRQ, drain bytes from the SX1276 FIFO (REG_FIFO).
        Quantity is at least FIFO_THRESH+1; drain until FifoEmpty asserted.
-       Independent of IRQs, poll RegRssiValue every loop so the API can
-       expose noise-floor RSSI even when no sync has fired yet — needed
-       for diagnosing whether the RF front-end is alive at all. */
+       Independent of IRQs, poll RegRssiValue + IrqFlags1 every loop so
+       the API can expose noise-floor RSSI and sync-match status even
+       when no FifoLevel IRQ has fired — needed to tell whether the RF
+       front-end is alive and whether the sync detector ever matches. */
+    int64_t last_log_us = 0;
+    uint32_t bytes_at_last_log = 0;
+    bool prev_sync_match = false;
+
     for (;;) {
-        if (xSemaphoreTake(s_irq_sem, pdMS_TO_TICKS(250)) == pdTRUE) {
-            for (int i = 0; i < 64; i++) {
-                uint8_t flags2;
-                if (reg_read(0x3F, &flags2) != ESP_OK) break;  /* IrqFlags2 */
-                if (flags2 & 0x40) break;                      /* FifoEmpty */
-                uint8_t b;
-                if (reg_read(REG_FIFO, &b) != ESP_OK) break;
-                xQueueSend(s_bytes, &b, 0);
-            }
+        /* Block briefly on DIO0 (PayloadReady) but always fall through
+           to drain whatever the FIFO holds — robust against missed IRQs. */
+        xSemaphoreTake(s_irq_sem, pdMS_TO_TICKS(250));
+
+        /* Drain FIFO while it has bytes. RS41 frame is up to 320 bytes;
+           cap loops to FIFO depth (66) per pass to bound register reads. */
+        for (int i = 0; i < 66; i++) {
+            uint8_t flags2;
+            if (reg_read(0x3F, &flags2) != ESP_OK) break;  /* IrqFlags2 */
+            if (flags2 & 0x40) break;                      /* FifoEmpty */
+            uint8_t b;
+            if (reg_read(REG_FIFO, &b) != ESP_OK) break;
+            xQueueSend(s_bytes, &b, 0);
+            s_byte_count++;
         }
+
         uint8_t rssi;
         if (reg_read(REG_RSSI_VALUE, &rssi) == ESP_OK) {
             s_rssi_dbm = -((int16_t)rssi >> 1);
         }
+
+        /* Watch IrqFlags1 (0x3E) bit 0 = SyncAddressMatch.
+           Edge-detect rising transitions and count them. */
+        uint8_t flags1;
+        if (reg_read(0x3E, &flags1) == ESP_OK) {
+            bool sync_match = (flags1 & 0x01) != 0;
+            if (sync_match && !prev_sync_match) {
+                s_sync_count++;
+            }
+            prev_sync_match = sync_match;
+        }
+
+        /* Periodic summary every ~5 s. */
+        int64_t now = esp_timer_get_time();
+        if (now - last_log_us >= 5000000LL) {
+            uint32_t bps = (s_byte_count - bytes_at_last_log) / 5;
+            ESP_LOGI(TAG, "rx: rssi=%d dBm  bytes=%lu (%lu B/s)  sync_match=%lu",
+                     s_rssi_dbm, (unsigned long)s_byte_count,
+                     (unsigned long)bps, (unsigned long)s_sync_count);
+            bytes_at_last_log = s_byte_count;
+            last_log_us = now;
+        }
     }
 }
+
+uint32_t st_rf_byte_count(void) { return s_byte_count; }
+uint32_t st_rf_sync_count(void) { return s_sync_count; }
 
 esp_err_t st_rf_init(void)
 {
@@ -198,9 +237,13 @@ esp_err_t st_rf_init(void)
     reg_write(REG_PAYLOAD_LEN,    0xFF);
     reg_write(REG_FIFO_THRESH,    0x80 | 31); /* TxStartCondition=FifoNotEmpty (irrelevant for RX); FifoThreshold=31 */
 
-    /* DIO0 = FifoLevel (FSK mode RX): RegDioMapping1 = 00 (DIO0 = PayloadReady)
-       For continuous RX with FifoLevel, set DIO0 mapping = 01 (FifoLevel).  */
-    reg_write(REG_DIO_MAPPING1, 0x40);
+    /* DIO0 mapping in FSK Packet-mode RX:
+         00 = PayloadReady   ← we use this
+         01 = CrcOk          (incorrect: was the previous setting)
+       PayloadReady fires when the whole packet is in FIFO. The rx_task
+       additionally polls IrqFlags2 / FIFO every 250 ms regardless of
+       DIO0, so even if the IRQ misses we still drain. */
+    reg_write(REG_DIO_MAPPING1, 0x00);
 
     /* IRQ pin */
     gpio_config_t gi = {

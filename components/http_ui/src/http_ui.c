@@ -14,6 +14,7 @@
 #include "config_store.h"
 #include "platform_common.h"
 #include "sonde_types.h"
+#include "rf_sx1276.h"
 
 extern const uint8_t index_html_start[] asm("_binary_index_html_start");
 extern const uint8_t index_html_end[]   asm("_binary_index_html_end");
@@ -84,6 +85,7 @@ static esp_err_t h_state(httpd_req_t *req)
         "\"h_vel_kmh\":%.1f,\"v_vel_ms\":%.1f,"
         "\"rssi_dbm\":%d,\"afc_hz\":%ld,"
         "\"bat_pct\":-1,\"bat_mv\":0,"
+        "\"rf_bytes\":%lu,\"rf_sync\":%lu,"
         "\"version\":\"%s\","
         "\"uptime_s\":%lld"
         "}",
@@ -94,6 +96,8 @@ static esp_err_t h_state(httpd_req_t *req)
         f.lat, f.lon, (long)f.alt_m,
         f.h_vel_kmh, f.v_vel_ms,
         f.rssi_dbm, (long)f.afc_hz,
+        (unsigned long)st_rf_byte_count(),
+        (unsigned long)st_rf_sync_count(),
         st_version_string(),
         esp_timer_get_time() / 1000000LL);
     if (n < 0 || n >= (int)sizeof(buf)) return ESP_FAIL;

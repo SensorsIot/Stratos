@@ -13,6 +13,7 @@
 #include "config_store.h"
 #include "platform_common.h"
 #include "sonde_types.h"
+#include "rf_sx1276.h"
 
 #include "font5x7.h"
 
@@ -228,7 +229,13 @@ static void render_status(void)
     }
     snprintf(line, sizeof(line), "RSSI %d dBm", f.rssi_dbm);
     put_str(0, 6, line);
-    put_str(0, 7, st_version_string());
+    /* Diagnostic line (line 7): byte count and sync match count from the
+       SX1276 driver. Lets us see at a glance whether the front-end is
+       producing data even when state stays NO_SIGNAL. */
+    snprintf(line, sizeof(line), "B%lu S%lu",
+             (unsigned long)st_rf_byte_count(),
+             (unsigned long)st_rf_sync_count());
+    put_str(0, 7, line);
 
     flush();
 }
