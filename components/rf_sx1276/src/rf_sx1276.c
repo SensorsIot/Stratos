@@ -144,12 +144,13 @@ static void rx_task(void *arg)
     bool prev_sync_match = false;
 
     for (;;) {
-        /* Block briefly on DIO0 (PayloadReady) but always fall through
-           to drain whatever the FIFO holds — robust against missed IRQs. */
-        xSemaphoreTake(s_irq_sem, pdMS_TO_TICKS(250));
+        /* Poll the FIFO every ~30 ms (SX1276 64-byte FIFO fills in ~107 ms
+           at 4800 bps; we drain well within that to prevent overflow). The
+           DIO0 PayloadReady IRQ wakes us early when a packet completes. */
+        xSemaphoreTake(s_irq_sem, pdMS_TO_TICKS(30));
 
-        /* Drain FIFO while it has bytes. RS41 frame is up to 320 bytes;
-           cap loops to FIFO depth (66) per pass to bound register reads. */
+        /* Drain FIFO while it has bytes. Cap per-pass loop to 66 (FIFO
+           depth + slack) to bound register reads. */
         for (int i = 0; i < 66; i++) {
             uint8_t flags2;
             if (reg_read(0x3F, &flags2) != ESP_OK) break;  /* IrqFlags2 */
@@ -230,12 +231,15 @@ esp_err_t st_rf_init(void)
     reg_write(REG_OP_MODE, 0x00);
     set_mode(MODE_STDBY);
 
-    /* Disable LoRa packet engine variants by setting fixed-len FSK packet
-       mode with payload length 0 (we read raw bytes via FifoLevel IRQ). */
+    /* FSK packet mode, fixed length = 312 bytes (RS41 frame body, post-
+       sync). 312 = 0x138, needs the 9-bit form: PACKET_CONFIG2 bits 2:0
+       hold the MSBs (here = 1), REG_PAYLOAD_LEN holds the low 8 bits
+       (0x38). With 8-bit payload (255) the frame got truncated and the
+       last ~57 bytes spliced from the NEXT packet, breaking RS ECC. */
     reg_write(REG_PACKET_CONFIG1, 0x00); /* fixed length, no CRC, no whitening */
-    reg_write(REG_PACKET_CONFIG2, 0x40); /* PacketMode=1 (packet), no IO */
-    reg_write(REG_PAYLOAD_LEN,    0xFF);
-    reg_write(REG_FIFO_THRESH,    0x80 | 31); /* TxStartCondition=FifoNotEmpty (irrelevant for RX); FifoThreshold=31 */
+    reg_write(REG_PACKET_CONFIG2, 0x41); /* PacketMode=1, PayloadLen MSBs=1 */
+    reg_write(REG_PAYLOAD_LEN,    0x38); /* PayloadLen low 8 bits → 312 */
+    reg_write(REG_FIFO_THRESH,    0x80 | 31); /* FifoThreshold=31 */
 
     /* DIO0 mapping in FSK Packet-mode RX:
          00 = PayloadReady   ← we use this

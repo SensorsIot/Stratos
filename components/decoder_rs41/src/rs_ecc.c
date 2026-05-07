@@ -80,14 +80,16 @@ int rs_decode_255_231(uint8_t r[255])
 {
     gf_init();
 
-    /* 1. Syndromes S_i = r(α^{i+RS_FCR}) for i = 0..23.
-       RS_FCR (first consecutive root) = 0 means generator has roots
-       α^0..α^23; RS_FCR = 1 means α^1..α^24. */
+    /* 1. Syndromes.
+       For RS41 (Phil Karn library convention used by rs1729) the codeword,
+       when interpreted in our low-degree-first convention, has roots at
+       α^0, α^-1, α^-2, ..., α^-23. So syndromes are evaluated with a
+       negative step. */
     #define RS_FCR 0
     uint8_t S[RS_NPAR];
     int any_nonzero = 0;
     for (int i = 0; i < RS_NPAR; i++) {
-        S[i] = poly_eval(r, RS_N, gf_alpha_pow(i + RS_FCR));
+        S[i] = poly_eval(r, RS_N, gf_alpha_pow(-(i + RS_FCR)));
         if (S[i]) any_nonzero = 1;
     }
     if (!any_nonzero) return 0;   /* clean codeword */
@@ -137,16 +139,17 @@ int rs_decode_255_231(uint8_t r[255])
 
     if (L == 0 || L > RS_T) return -1;   /* uncorrectable */
 
-    /* 3. Chien search: error positions are roots of Λ(x). i.e. the j for
-          which Λ(α^-j) = 0 → error at position j (0-indexed). */
+    /* 3. Chien search: error positions are roots of Λ(x). With our
+          negative-step root convention, evaluate at α^j (positive) and
+          map error position to j. */
     int      err_pos[RS_T];
-    uint8_t  err_X[RS_T];        /* X_k = α^(error position) */
+    uint8_t  err_X[RS_T];        /* X_k = α^-(error position) */
     int      n_err = 0;
     for (int j = 0; j < RS_N; j++) {
-        if (poly_eval(Lambda, L + 1, gf_alpha_pow(-j)) == 0) {
+        if (poly_eval(Lambda, L + 1, gf_alpha_pow(j)) == 0) {
             if (n_err >= RS_T) return -1;
             err_pos[n_err] = j;
-            err_X[n_err]   = gf_alpha_pow(j);
+            err_X[n_err]   = gf_alpha_pow(-j);
             n_err++;
         }
     }
@@ -187,7 +190,7 @@ int rs_decode_255_231(uint8_t r[255])
 
     /* Sanity: recompute syndromes; they must all be zero now. */
     for (int i = 0; i < RS_NPAR; i++) {
-        if (poly_eval(r, RS_N, gf_alpha_pow(i + RS_FCR)) != 0) return -1;
+        if (poly_eval(r, RS_N, gf_alpha_pow(-(i + RS_FCR))) != 0) return -1;
     }
     return n_err;
 }
@@ -197,7 +200,7 @@ int rs_count_nonzero_syndromes(const uint8_t r[255])
     gf_init();
     int n = 0;
     for (int i = 0; i < RS_NPAR; i++) {
-        if (poly_eval(r, RS_N, gf_alpha_pow(i + RS_FCR)) != 0) n++;
+        if (poly_eval(r, RS_N, gf_alpha_pow(-(i + RS_FCR))) != 0) n++;
     }
     return n;
 }

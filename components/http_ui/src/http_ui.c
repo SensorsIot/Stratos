@@ -242,6 +242,31 @@ static esp_err_t h_config_post(httpd_req_t *req)
     return send_json(req, "{\"ok\":true}");
 }
 
+/* Dump a raw 320-byte post-sync frame as hex JSON. ?slot=0..3 selects
+   which ring slot. Used for offline RS-decode reverse-engineering. */
+static esp_err_t h_raw(httpd_req_t *req)
+{
+    char qs[16];
+    int slot = 0;
+    if (httpd_req_get_url_query_str(req, qs, sizeof(qs)) == ESP_OK) {
+        char val[8];
+        if (httpd_query_key_value(qs, "slot", val, sizeof(val)) == ESP_OK) {
+            slot = atoi(val);
+        }
+    }
+    if (slot < 0 || slot > 3) slot = 0;
+    uint8_t raw[312];
+    int seqno = -1;
+    decoder_rs41_get_raw(slot, raw, &seqno);
+    char buf[1024];
+    int n = snprintf(buf, sizeof(buf), "{\"slot\":%d,\"seqno\":%d,\"hex\":\"", slot, seqno);
+    for (int i = 0; i < 312 && n + 2 < (int)sizeof(buf) - 4; i++) {
+        n += snprintf(buf + n, sizeof(buf) - n, "%02x", raw[i]);
+    }
+    n += snprintf(buf + n, sizeof(buf) - n, "\"}");
+    return send_json(req, buf);
+}
+
 static esp_err_t h_version(httpd_req_t *req)
 {
     char buf[128];
@@ -299,6 +324,7 @@ esp_err_t st_http_start(void)
     REG("/api/config",        HTTP_GET,  h_config_get);
     REG("/api/config",        HTTP_POST, h_config_post);
     REG("/api/version",       HTTP_GET,  h_version);
+    REG("/api/raw",           HTTP_GET,  h_raw);
     REG("/api/factory-reset", HTTP_POST, h_factory_reset);
     /* OTA endpoints are registered separately by main via st_ota_register(). */
 

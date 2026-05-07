@@ -26,6 +26,12 @@ int decoder_rs41_last_rs_errs(void);
 int decoder_rs41_last_synd1(void);
 int decoder_rs41_last_synd2(void);
 
+/* Diagnostic: copy slot-th raw 312-byte post-sync frame buffer (BEFORE
+   any bit-reverse / PRBS / ECC). 0 ≤ slot < 4 (RAW_FRAMES). seqno_out is
+   the monotonic frame counter at the time this slot was written; -1 if
+   never written yet. */
+void decoder_rs41_get_raw(int slot, uint8_t out[312], int *seqno_out);
+
 #ifdef __cplusplus
 }
 #endif

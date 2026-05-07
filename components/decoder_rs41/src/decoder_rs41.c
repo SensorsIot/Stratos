@@ -43,14 +43,34 @@
 static const char *TAG = "rs41";
 
 /* RS41 transmits one frame per second. After the SX1276 sync match
-   consumes the 8-byte sync header, the remaining frame body is 320
-   bytes (chip-rate, post-sync). */
-#define FRAME_BYTES          320
+   consumes the 8-byte sync header, the remaining frame body is 312
+   bytes (320 byte frame minus 8 byte sync). The SX1276 PayloadLen is
+   set to 312 so a single packet is exactly one frame's body — no
+   inter-frame splicing. */
+#define FRAME_BYTES          312
 #define IDLE_FRAMES_NO_BYTES 2   /* publish NO_SIGNAL after 1 s of silence */
 
 static TaskHandle_t  s_task;
 static QueueHandle_t s_q;
 static volatile bool s_running;
+
+/* Raw-datagram ring buffer: keep the last N raw 320-byte frames (post-sync,
+   before bit-reverse / PRBS / ECC) so we can pull them out via /api/raw
+   and reverse-engineer the proper decode chain in Python. */
+#define RAW_FRAMES 4
+static uint8_t  s_raw_frames[RAW_FRAMES][FRAME_BYTES];
+static volatile int s_raw_count;            /* total frames captured (monotonic) */
+static volatile int s_raw_seqno[RAW_FRAMES];
+
+void decoder_rs41_get_raw(int slot, uint8_t out[FRAME_BYTES], int *seqno_out)
+{
+    if (slot < 0 || slot >= RAW_FRAMES) {
+        if (seqno_out) *seqno_out = -1;
+        return;
+    }
+    memcpy(out, s_raw_frames[slot], FRAME_BYTES);
+    if (seqno_out) *seqno_out = s_raw_seqno[slot];
+}
 
 /* Last raw ECEF values seen by the parser (for diagnostic exposure via
    the HTTP API). Only updated when parse_frame succeeds. */
@@ -130,33 +150,34 @@ static inline int16_t read_i16_le(const uint8_t *body, int pos)
     return (int16_t)v;
 }
 
-/* RS41 frame layout for ECC purposes (positions are in the full frame
-   including the 8-byte sync header, which the SX1276 sync detector
-   consumed; our raw buffer starts at frame position 8):
-     frame[ 0.. 7] sync
-     frame[ 8..31] code-1 parity (24 bytes)
-     frame[32..55] code-2 parity (24 bytes)
-     frame[56..  ] interleaved data (even index → code 1, odd → code 2)
-   Each RS code carries 132 data bytes for a 320-byte frame, zero-padded
-   up to 231 data positions in the RS(255,231) codeword. The codeword
-   layout matches existing RS41 receivers: data fills positions 230..99
-   (decreasing) and parity fills 254..231 (decreasing). */
+/* RS41 frame layout for ECC: parity at frame[8..55] (two contiguous
+   24-byte blocks), interleaved data at frame[56..]. rs1729's reference
+   builds the codeword with parity at cw[0..23] and data at cw[24..254],
+   but in the Phil-Karn-RS convention where index 0 is the HIGHEST
+   polynomial degree (x^(N-1)), not the constant term.
+
+   Our textbook-style decoder treats index 0 as the constant term of the
+   polynomial, so we build the codeword with the opposite indexing —
+   equivalent to reversing rs1729's cw[] in place.
+
+   Polynomial-coefficient convention (cw[i] = coefficient of x^i):
+     cw[0..23]    = parity in reverse order (cw[0] = parity[23], cw[23] = parity[0])
+     cw[24..122]  = zero pad (99 positions, K=231 minus the 132 real data bytes)
+     cw[123..254] = data in reverse order (cw[123] = data[131], cw[254] = data[0]) */
 static int build_codeword(const uint8_t *body, int parity_off, int data_off,
                           uint8_t cw[255])
 {
     memset(cw, 0, 255);
-    /* 132 interleaved data bytes — body[data_off + 2*i] for i in 0..131. */
-    for (int i = 0; i < 132; i++) cw[230 - i] = body[data_off + 2 * i];
-    /* 24 parity bytes — body[parity_off + i] for i in 0..23. */
-    for (int i = 0; i < 24;  i++) cw[254 - i] = body[parity_off + i];
+    for (int i = 0; i < 24;  i++) cw[i]       = body[parity_off + 23 - i];
+    for (int j = 0; j < 132; j++) cw[123 + j] = body[data_off + 2 * (131 - j)];
     return 0;
 }
 
 static void apply_codeword(const uint8_t cw[255], uint8_t *body,
                            int parity_off, int data_off)
 {
-    for (int i = 0; i < 132; i++) body[data_off + 2 * i] = cw[230 - i];
-    for (int i = 0; i < 24;  i++) body[parity_off + i]   = cw[254 - i];
+    for (int i = 0; i < 24;  i++) body[parity_off + 23 - i]      = cw[i];
+    for (int j = 0; j < 132; j++) body[data_off + 2 * (131 - j)] = cw[123 + j];
 }
 
 /* Diagnostic counters, written by rs_correct(); declared here so they're in
@@ -331,6 +352,14 @@ static void task(void *arg)
             if (pos >= FRAME_BYTES) {
                 sonde_frame_t f;
                 if (parse_frame(buf, &f)) {
+                    /* Capture only frames that pass the strict SondeID
+                       check — these are the genuinely-clean frames we
+                       want to reverse-engineer the RS layout against. */
+                    int slot = s_raw_count % RAW_FRAMES;
+                    memcpy(s_raw_frames[slot], buf, FRAME_BYTES);
+                    s_raw_seqno[slot] = s_raw_count;
+                    s_raw_count++;
+
                     last_good    = f;
                     last_good_us = esp_timer_get_time();
                     decoder_core_publish_frame(&f);
