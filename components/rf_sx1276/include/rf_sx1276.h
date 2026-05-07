@@ -19,6 +19,7 @@ typedef struct {
     uint32_t     rxbw_hz;
     uint8_t      sync_word[8];
     uint8_t      sync_len;
+    uint16_t     payload_len;   /* chip-bytes per packet; 0 → use 312 (RS41 default) */
 } rf_profile_t;
 
 esp_err_t   st_rf_init(void);

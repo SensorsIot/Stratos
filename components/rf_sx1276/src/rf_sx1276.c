@@ -43,6 +43,7 @@ static const rf_profile_t s_profiles[] = {
         .rxbw_hz     = 12500,    /* rxbw_idx 4 = 12.5 kHz */
         .sync_word   = {0x08, 0x6D, 0x53, 0x88, 0x44, 0x69, 0x48, 0x1F},
         .sync_len    = 8,
+        .payload_len = 312,
     },
     {
         .type        = SONDE_TYPE_M20,
@@ -53,26 +54,48 @@ static const rf_profile_t s_profiles[] = {
         .sync_len    = 2,
     },
     {
-        /* M10/M20: GFSK 9600 bps, fdev ±2.4 kHz (in chip units we
-           over-set to 9600 for slicer headroom, matching rdz_ttgo_sonde),
-           RxBw 25 kHz. Sync = single byte 0x66 — the M10 protocol's
-           preamble is repeated 0x55, which after bit-reversal aligns
-           with 0xAA in our register; a single-byte 0x66 sync is what
-           rdz uses successfully in the field. */
+        /* M10/M20: GFSK 9600 bps (chip rate — Manchester-encoded data
+           rate is half), fdev over-set to 9600 for slicer headroom (per
+           rdz_ttgo_sonde's known-working SX1276 setup), RxBw 25 kHz.
+           Sync = single byte 0x66.
+           Payload = 202 chip bytes = 101 Manchester-decoded data bytes
+           (one M10 frame). M20 frames are shorter — software re-aligns. */
         .type        = SONDE_TYPE_M10,
         .bitrate_bps = 9600,
         .freq_dev_hz = 9600,
         .rxbw_hz     = 25000,
         .sync_word   = {0x66},
         .sync_len    = 1,
+        .payload_len = 202,
     },
     {
+        /* M20: same RF as M10 (GFSK 9600 chip / 4800 data, fdev over-set
+           to 9600, RxBw 25 kHz), single-byte sync 0x66. Frame = 88 data
+           bytes Manchester-encoded → 176 chip bytes per packet.
+           PayloadLen tracks the longer M10 (202) so a single packet
+           captures either format; the parser walks the frame at its
+           own length. */
+        .type        = SONDE_TYPE_M20,
+        .bitrate_bps = 9600,
+        .freq_dev_hz = 9600,
+        .rxbw_hz     = 25000,
+        .sync_word   = {0x66},
+        .sync_len    = 1,
+        .payload_len = 202,
+    },
+    {
+        /* DFM-09 / DFM-17: GFSK 2500 chip-rate (Manchester data rate
+           halved to 1250 bps in some sources; rdz uses 2500 chip with
+           software Manchester decode). RxBw 10 kHz, sync 4 bytes from
+           rdz reference. PayloadLen TBD; 256 placeholder is plenty for
+           the longest DFM frame. Real subframe parsing is multi-day. */
         .type        = SONDE_TYPE_DFM,
         .bitrate_bps = 2500,
         .freq_dev_hz = 2500,
         .rxbw_hz     = 10000,
         .sync_word   = {0x45, 0xCF, 0x9A, 0x90},
         .sync_len    = 4,
+        .payload_len = 256,
     },
 };
 
@@ -237,14 +260,13 @@ esp_err_t st_rf_init(void)
     reg_write(REG_OP_MODE, 0x00);
     set_mode(MODE_STDBY);
 
-    /* FSK packet mode, fixed length = 312 bytes (RS41 frame body, post-
-       sync). 312 = 0x138, needs the 9-bit form: PACKET_CONFIG2 bits 2:0
-       hold the MSBs (here = 1), REG_PAYLOAD_LEN holds the low 8 bits
-       (0x38). With 8-bit payload (255) the frame got truncated and the
-       last ~57 bytes spliced from the NEXT packet, breaking RS ECC. */
+    /* FSK packet mode, fixed length. Default (RS41) is 312; per-decoder
+       profile overrides via apply_profile when a different format is
+       activated. The 9-bit payload field needs PACKET_CONFIG2[2:0] for
+       the high 3 bits + REG_PAYLOAD_LEN for the low 8 bits. */
     reg_write(REG_PACKET_CONFIG1, 0x00); /* fixed length, no CRC, no whitening */
-    reg_write(REG_PACKET_CONFIG2, 0x41); /* PacketMode=1, PayloadLen MSBs=1 */
-    reg_write(REG_PAYLOAD_LEN,    0x38); /* PayloadLen low 8 bits → 312 */
+    reg_write(REG_PACKET_CONFIG2, 0x41); /* PacketMode=1, PayloadLen MSBs=1 → 312 */
+    reg_write(REG_PAYLOAD_LEN,    0x38);
     reg_write(REG_FIFO_THRESH,    0x80 | 31); /* FifoThreshold=31 */
 
     /* DIO0 mapping in FSK Packet-mode RX:
@@ -333,6 +355,14 @@ esp_err_t st_rf_apply_profile(const rf_profile_t *p)
     uint8_t bw = rxbw_encode(p->rxbw_hz);
     reg_write(REG_RXBW,   bw);
     reg_write(REG_AFC_BW, bw);
+
+    /* Profile may override the packet length (each sonde format has its
+       own frame size — 312 RS41, 202 M10/M20 chip bytes, etc.). */
+    uint16_t plen = p->payload_len ? p->payload_len : 312;
+    /* Preserve PACKET_CONFIG2 bits 7:3 (we set bit 6 = packet mode at
+       init), update bits 2:0 with the high 3 bits of payload length. */
+    reg_write(REG_PACKET_CONFIG2, 0x40 | ((plen >> 8) & 0x07));
+    reg_write(REG_PAYLOAD_LEN,    plen & 0xFF);
 
     /* sync_cfg = 0x50 | (sync_len-1):
        bits 7:6 = 01  AutoRestartRx ON without PLL re-sync

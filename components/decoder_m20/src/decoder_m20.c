@@ -1,48 +1,28 @@
 /*
- * decoder_m10 — Meteomodem M10 frame consumer.
+ * decoder_m20 — Meteomodem M20 frame consumer.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  * Copyright (C) 2026 SensorsIot
  *
- * Original implementation. Protocol facts (Manchester chip encoding,
- * frame length, custom rolling CRC algorithm, field offsets, scale
- * factors) are publicly documented; rs1729/RS and dl9rdz/rdz_ttgo_sonde
- * are the canonical references. No code copied.
+ * Same architecture as decoder_m10 (Manchester chip → data, custom
+ * rolling CRC, fixed-offset field extraction). Only the frame length,
+ * field offsets, and scale factors differ.
  *
- * Pipeline:
- *   SX1276 sync match (1-byte 0x66) → FIFO bytes (chip-rate, MSB-first)
- *     → bit-reverse to LSB-first chip stream
- *     → Manchester decode (every 2 chips → 1 data bit; output bit
- *       value = first chip of pair; valid Manchester pair = transition,
- *       i.e. chips differ)
- *     → 101-byte data frame
- *     → custom rolling CRC at frame[99..100]
- *     → field extraction at fixed offsets
- *     → publish sonde_frame_t
- *
- * Frame layout (data bytes after Manchester decode, 101 bytes):
- *    0  marker (varies; M10 has 0x?? 0x9F 0x20 in the first 3 bytes)
- *    4  i16 BE   v_east   × 0.005 m/s
- *    6  i16 BE   v_north  × 0.005 m/s
- *    8  i16 BE   v_up     × 0.005 m/s
- *   10  u32 BE   GPS time-of-week (ms? sec?)
- *   14  i32 BE   latitude  × (1.0 / 0xB60B60)  → degrees
- *   18  i32 BE   longitude × (1.0 / 0xB60B60)  → degrees
- *   22  i32 BE   altitude  × 0.001  m (i.e. raw is mm)
- *   30  u8       satellite count
- *   32  u16 BE   GPS week
- *   99  u16 BE   CRC (covers bytes 0..98)
+ * Frame layout (data bytes, ~88 bytes, BE throughout):
+ *    8  i24 BE   altitude     × 0.01  m
+ *   11  i16 BE   v_east       × 0.01  m/s
+ *   13  i16 BE   v_north      × 0.01  m/s
+ *   24  i16 BE   v_up         × 0.01  m/s
+ *   28  i32 BE   latitude     × 1e-6  deg
+ *   32  i32 BE   longitude    × 1e-6  deg
+ *   86  u16 BE   CRC          covers bytes 0..85
  */
 
-#include "decoder_m10.h"
+#include "decoder_m20.h"
 #include "rf_sx1276.h"
 
 #include <string.h>
 #include <math.h>
-
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
 
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -51,25 +31,20 @@
 
 #include "sonde_types.h"
 
-static const char *TAG = "m10";
+static const char *TAG = "m20";
 
-/* Chip-byte buffer size: one M10 frame = 101 data bytes × 2 chips/bit ×
-   8 bits/byte / 8 chips/chip-byte = 202 chip bytes. */
 #define CHIP_BYTES           202
-#define DATA_BYTES           101
-#define CRC_POS              99
+#define DATA_BYTES           101   /* same chip-byte budget as M10 to match radio profile */
+#define M20_FRAMELEN         88
+#define M20_CRC_POS          86
 #define IDLE_FRAMES_NO_BYTES 2
 
-#define DEGMUL  (1.0 / (double)0xB60B60)
-#define VMUL    0.005f
+#define VMUL_M20  0.01f
 
 static TaskHandle_t  s_task;
 static QueueHandle_t s_q;
 static volatile bool s_running;
 
-/* Reverse the bit order within a byte. SX1276 emits chip bits LSB-first
-   per byte; rdz's reference treats them MSB-first when scanning for the
-   sync pattern. */
 static inline uint8_t bitrev8(uint8_t b)
 {
     b = ((b & 0xF0) >> 4) | ((b & 0x0F) << 4);
@@ -78,10 +53,6 @@ static inline uint8_t bitrev8(uint8_t b)
     return b;
 }
 
-/* Manchester-decode CHIP_BYTES chip bytes into DATA_BYTES data bytes.
-   Each data bit comes from one chip pair: output bit = first chip of
-   the pair. (Pair must be a transition for valid Manchester; we don't
-   enforce it here — CRC catches sync-misaligned frames.) */
 static void manchester_decode(const uint8_t *chips, uint8_t *out)
 {
     int out_bit = 0;
@@ -95,7 +66,6 @@ static void manchester_decode(const uint8_t *chips, uint8_t *out)
             int data_bit  = 7 - (data_idx & 7);
             if (data_byte >= DATA_BYTES) goto done;
             if (phase == 0) {
-                /* First chip of pair = data bit value. */
                 if (chip) out[data_byte] |=  (1 << data_bit);
                 else      out[data_byte] &= ~(1 << data_bit);
             }
@@ -106,10 +76,6 @@ done:
     return;
 }
 
-/* M10 / M20 custom rolling CRC-16. Port of the algorithm publicly
-   documented (and used by rs1729, rdz_ttgo_sonde, sondedump): per byte
-   apply bit-twiddles to a running 16-bit state. Original C in those
-   references; this is an independent re-expression. */
 static uint16_t crc_step(uint16_t c, uint8_t b)
 {
     uint8_t c1 = (c >> 0) & 0xFF;
@@ -124,15 +90,14 @@ static uint16_t crc_step(uint16_t c, uint8_t b)
     return (uint16_t)((c1 << 8) | c0);
 }
 
-static bool m10_crc_ok(const uint8_t *frame)
+static bool m20_crc_ok(const uint8_t *frame)
 {
     uint16_t cs = 0;
-    for (int i = 0; i < CRC_POS; i++) cs = crc_step(cs, frame[i]);
-    uint16_t got = ((uint16_t)frame[CRC_POS] << 8) | frame[CRC_POS + 1];
+    for (int i = 0; i < M20_CRC_POS; i++) cs = crc_step(cs, frame[i]);
+    uint16_t got = ((uint16_t)frame[M20_CRC_POS] << 8) | frame[M20_CRC_POS + 1];
     return cs == got;
 }
 
-/* Big-endian readers (M10 is uniformly BE). */
 static inline int32_t rd_i32_be(const uint8_t *p)
 {
     return (int32_t)(((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
@@ -142,64 +107,53 @@ static inline int16_t rd_i16_be(const uint8_t *p)
 {
     return (int16_t)(((uint16_t)p[0] << 8) | p[1]);
 }
-
-/* Local-tangent-plane horizontal speed (km/h) and vertical (m/s, +up)
-   from per-component velocity. M10 already gives east/north/vertical
-   directly — no ECEF rotation needed. */
-static void vel_to_local(float ve, float vn, float vv,
-                         float *h_kmh, float *v_ms)
+static inline int32_t rd_i24_be(const uint8_t *p)
 {
-    *h_kmh = sqrtf(ve * ve + vn * vn) * 3.6f;
-    *v_ms  = vv;
+    int32_t v = ((int32_t)p[0] << 16) | ((int32_t)p[1] << 8) | p[2];
+    if (v & 0x00800000) v |= 0xFF000000; /* sign-extend */
+    return v;
 }
 
 static bool parse_frame(const uint8_t *chips, sonde_frame_t *out)
 {
     memset(out, 0, sizeof(*out));
-    out->type         = SONDE_TYPE_M10;
+    out->type         = SONDE_TYPE_M20;
     out->rssi_dbm     = st_rf_rssi_dbm();
     out->monotonic_us = esp_timer_get_time();
 
     uint8_t frame[DATA_BYTES] = {0};
     manchester_decode(chips, frame);
 
-    if (!m10_crc_ok(frame)) {
+    if (!m20_crc_ok(frame)) {
         return false;
     }
 
-    /* Marker check: expect 0x9F at frame[1] (per rdz reference). */
-    if (frame[1] != 0x9F) {
-        return false;
-    }
-
-    /* Serial number reconstruction per rdz: encoded across bytes
-       18..25. Format "M10-aaaa-bcccc" approximate. We extract a
-       readable 8-character placeholder for now. */
-    uint8_t id_hi = frame[18];
-    uint16_t id_lo = (((uint16_t)frame[19] << 8) | frame[20]) >> 2;
-    snprintf(out->name, sizeof(out->name), "M%02X%05u",
-             (unsigned)id_hi, (unsigned)id_lo);
+    /* Serial number bytes are encoded across positions 19..23 in the
+       reference. We render an 8-character placeholder pending a real
+       decode (FSD §11.6 Phase B). */
+    snprintf(out->name, sizeof(out->name), "M20-%02X%02X%02X",
+             frame[19], frame[20], frame[21]);
     out->state = SONDE_STATE_NAME_ONLY;
 
-    /* GPS position. */
-    int32_t lat_raw = rd_i32_be(frame + 14);
-    int32_t lon_raw = rd_i32_be(frame + 18);
-    int32_t alt_raw = rd_i32_be(frame + 22);
+    int32_t lat_raw = rd_i32_be(frame + 28);
+    int32_t lon_raw = rd_i32_be(frame + 32);
+    int32_t alt_raw = rd_i24_be(frame + 8);
     if (lat_raw != 0 || lon_raw != 0) {
-        double lat = lat_raw * DEGMUL;
-        double lon = lon_raw * DEGMUL;
-        double alt = alt_raw * 0.001;
+        double lat = lat_raw * 1e-6;
+        double lon = lon_raw * 1e-6;
+        double alt = alt_raw * 0.01;
         if (fabs(lat) <= 90.0 && fabs(lon) <= 180.0 &&
             alt > -500.0 && alt < 50000.0) {
             out->lat   = lat;
             out->lon   = lon;
             out->alt_m = (int32_t)alt;
 
-            float ve = rd_i16_be(frame +  4) * VMUL;
-            float vn = rd_i16_be(frame +  6) * VMUL;
-            float vv = rd_i16_be(frame +  8) * VMUL;
-            vel_to_local(ve, vn, vv, &out->h_vel_kmh, &out->v_vel_ms);
-            out->state = SONDE_STATE_TRACKING;
+            float ve = rd_i16_be(frame + 11) * VMUL_M20;
+            float vn = rd_i16_be(frame + 13) * VMUL_M20;
+            float vv = rd_i16_be(frame + 24) * VMUL_M20;
+            out->h_vel_kmh = sqrtf(ve * ve + vn * vn) * 3.6f;
+            out->v_vel_ms  = vv;
+            out->state     = SONDE_STATE_TRACKING;
         }
     }
 
@@ -242,7 +196,7 @@ static void task(void *arg)
                 f.monotonic_us = now_us;
             } else {
                 f.state        = SONDE_STATE_NO_SIGNAL;
-                f.type         = SONDE_TYPE_M10;
+                f.type         = SONDE_TYPE_M20;
                 f.rssi_dbm     = st_rf_rssi_dbm();
                 f.monotonic_us = now_us;
             }
@@ -255,22 +209,22 @@ static void task(void *arg)
     vTaskDelete(NULL);
 }
 
-static esp_err_t m10_start(QueueHandle_t byte_q)
+static esp_err_t m20_start(QueueHandle_t byte_q)
 {
     if (s_running) return ESP_OK;
     s_q       = byte_q;
     s_running = true;
 
-    const rf_profile_t *p = st_rf_profile_for(SONDE_TYPE_M10);
+    const rf_profile_t *p = st_rf_profile_for(SONDE_TYPE_M20);
     if (p) st_rf_apply_profile(p);
 
-    BaseType_t r = xTaskCreate(task, "m10", 8192, NULL, 10, &s_task);
+    BaseType_t r = xTaskCreate(task, "m20", 8192, NULL, 10, &s_task);
     if (r != pdPASS) { s_running = false; return ESP_FAIL; }
     ESP_LOGI(TAG, "decoder started");
     return ESP_OK;
 }
 
-static esp_err_t m10_stop(void)
+static esp_err_t m20_stop(void)
 {
     s_running = false;
     while (s_task) vTaskDelay(pdMS_TO_TICKS(20));
@@ -278,10 +232,10 @@ static esp_err_t m10_stop(void)
 }
 
 static const decoder_vtable_t s_vtable = {
-    .type  = SONDE_TYPE_M10,
-    .name  = "m10",
-    .start = m10_start,
-    .stop  = m10_stop,
+    .type  = SONDE_TYPE_M20,
+    .name  = "m20",
+    .start = m20_start,
+    .stop  = m20_stop,
 };
 
-const decoder_vtable_t *decoder_m10_vtable(void) { return &s_vtable; }
+const decoder_vtable_t *decoder_m20_vtable(void) { return &s_vtable; }

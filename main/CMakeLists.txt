@@ -18,6 +18,8 @@ idf_component_register(
         decoder_core
         decoder_rs41
         decoder_m10
+        decoder_m20
+        decoder_dfm
         sonde_state
         stratos_codec
 )
