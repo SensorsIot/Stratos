@@ -6,6 +6,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "driver/i2c_master.h"
 #include "esp_event.h"
 
@@ -41,6 +42,12 @@ static uint8_t    s_fb[WIDTH * PAGES];
 static volatile bool s_on = true;
 static volatile bool s_ready;
 static sonde_frame_t s_last_frame;
+/* Stickiness: keep the last NAME_ONLY / TRACKING frame visible for a few
+   seconds after signal drops, so the OLED doesn't flicker between the
+   real sonde ID and "-- searching --" each second. */
+static sonde_frame_t s_last_locked_frame;
+static int64_t       s_last_locked_us;
+#define STICKY_LOCK_US (10LL * 1000000LL)   /* 10 s */
 
 static esp_err_t send_cmd(uint8_t c)
 {
@@ -183,7 +190,12 @@ static void on_sonde_evt(void *arg, esp_event_base_t base, int32_t id, void *dat
 {
     (void)arg; (void)base;
     if (id == SONDE_EVT_FRAME && data) {
-        s_last_frame = *(sonde_frame_t *)data;
+        const sonde_frame_t *f = (const sonde_frame_t *)data;
+        s_last_frame = *f;
+        if (f->state == SONDE_STATE_TRACKING || f->state == SONDE_STATE_NAME_ONLY) {
+            s_last_locked_frame = *f;
+            s_last_locked_us    = f->monotonic_us;
+        }
     }
 }
 
@@ -203,7 +215,19 @@ static void render_status(void)
 {
     char line[32];
     st_config_t c = st_config_get();
-    sonde_frame_t f = s_last_frame;
+    sonde_frame_t cur = s_last_frame;
+
+    /* Pick the frame to display: prefer current if it has a lock, otherwise
+       fall back to the last known-good frame for STICKY_LOCK_US so the
+       display doesn't flicker between the real ID and "-- searching --". */
+    int64_t now_us = esp_timer_get_time();
+    sonde_frame_t f = cur;
+    if (cur.state != SONDE_STATE_TRACKING && cur.state != SONDE_STATE_NAME_ONLY &&
+        s_last_locked_us != 0 &&
+        (now_us - s_last_locked_us) < STICKY_LOCK_US) {
+        f = s_last_locked_frame;
+        f.rssi_dbm = cur.rssi_dbm;   /* keep RSSI live */
+    }
 
     st_oled_clear();
     snprintf(line, sizeof(line), "%-5s %3lu.%03lu MHz",

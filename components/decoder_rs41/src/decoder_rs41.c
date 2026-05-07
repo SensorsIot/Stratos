@@ -156,25 +156,20 @@ static bool parse_frame(const uint8_t *raw, sonde_frame_t *out)
     out->rssi_dbm     = st_rf_rssi_dbm();
     out->monotonic_us = esp_timer_get_time();
 
-    /* SondeID (8 ASCII bytes, alphanumeric in the wild). */
-    int valid_chars = 0;
+    /* SondeID: 8 chars, uppercase alphanumeric. RS41 serials are uniformly
+       uppercase letters + digits (e.g. R3651518). Reject the whole frame
+       if even one character fails the check — bit-corrupted frames easily
+       produce 5-7 valid chars, so a per-char threshold lets garbage
+       through. */
     char id[9] = {0};
     for (int i = 0; i < 8; i++) {
         uint8_t b = fb(raw, POS_SONDEID + i);
-        if ((b >= '0' && b <= '9') ||
-            (b >= 'A' && b <= 'Z') ||
-            (b >= 'a' && b <= 'z')) {
-            id[i] = (char)b;
-            valid_chars++;
-        } else {
-            id[i] = '?';
+        if (!((b >= '0' && b <= '9') || (b >= 'A' && b <= 'Z'))) {
+            return false;
         }
+        id[i] = (char)b;
     }
     id[8] = 0;
-    if (valid_chars < 6) {
-        /* Junk frame (sync misalignment or uncorrectable bit errors). */
-        return false;
-    }
     strncpy(out->name, id, sizeof(out->name) - 1);
     out->state = SONDE_STATE_NAME_ONLY;
 
@@ -203,12 +198,26 @@ static bool parse_frame(const uint8_t *raw, sonde_frame_t *out)
     return true;
 }
 
+/* Stickiness: once the parser produces a valid frame, keep re-publishing it
+   (with current RSSI) for STICKY_LOCK_US even if subsequent frames fail
+   validation or no bytes arrive. Prevents the UI / BLE / API from flickering
+   between a real serial and "NO SIGNAL" when reception is marginal.
+
+   Without Reed-Solomon error correction, we currently see ~1 clean parse
+   in every 20–30 frames at marginal RSSI. 60 s gives a comfortable
+   margin: as long as we get at least one clean parse per minute, the
+   user sees a steady ID. Falls through to NO_SIGNAL if the sonde really
+   is gone. */
+#define STICKY_LOCK_US (60LL * 1000000LL)
+
 static void task(void *arg)
 {
     (void)arg;
-    uint8_t  buf[FRAME_BYTES];
-    size_t   pos = 0;
-    int      idle_ticks = 0;
+    uint8_t       buf[FRAME_BYTES];
+    size_t        pos = 0;
+    int           idle_ticks = 0;
+    sonde_frame_t last_good = {0};
+    int64_t       last_good_us = 0;
 
     while (s_running) {
         uint8_t b;
@@ -218,23 +227,31 @@ static void task(void *arg)
             if (pos >= FRAME_BYTES) {
                 sonde_frame_t f;
                 if (parse_frame(buf, &f)) {
+                    last_good    = f;
+                    last_good_us = esp_timer_get_time();
                     decoder_core_publish_frame(&f);
                     ESP_LOGI(TAG, "frame: %s  state=%d  lat=%.4f lon=%.4f alt=%ld",
                              f.name, (int)f.state, f.lat, f.lon, (long)f.alt_m);
                 }
                 pos = 0;
             }
-        } else {
-            if (++idle_ticks >= IDLE_FRAMES_NO_BYTES) {
-                sonde_frame_t f = {0};
+        } else if (++idle_ticks >= IDLE_FRAMES_NO_BYTES) {
+            int64_t now_us = esp_timer_get_time();
+            sonde_frame_t f = {0};
+            if (last_good_us != 0 && (now_us - last_good_us) < STICKY_LOCK_US) {
+                /* Hold the last good frame; refresh just RSSI + timestamp. */
+                f = last_good;
+                f.rssi_dbm     = st_rf_rssi_dbm();
+                f.monotonic_us = now_us;
+            } else {
                 f.state        = SONDE_STATE_NO_SIGNAL;
                 f.type         = SONDE_TYPE_RS41;
                 f.rssi_dbm     = st_rf_rssi_dbm();
-                f.monotonic_us = esp_timer_get_time();
-                decoder_core_publish_frame(&f);
-                idle_ticks = 0;
-                pos = 0;
+                f.monotonic_us = now_us;
             }
+            decoder_core_publish_frame(&f);
+            idle_ticks = 0;
+            pos = 0;
         }
     }
     s_task = NULL;
