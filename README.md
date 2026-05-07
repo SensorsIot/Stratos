@@ -190,12 +190,14 @@ Stratos's BLE payload format is identical to the **MySondyGo API v3.0 ASCII prot
 
 ## 🙏 References & Credits
 
-- **[BalloonHunter](https://github.com/SensorsIot/BalloonHunter)** — companion iOS/Android app (Andreas Spiess, HB9BLA).
-- **[`rs1729/RS`](https://github.com/rs1729/RS)** — upstream radiosonde decoder reference (GPL-2.0). RS41 decoder algorithms here are derived from this work.
-- **[`dl9rdz/rdz_ttgo_sonde`](https://github.com/dl9rdz/rdz_ttgo_sonde)** — sister project, cross-referenced for hardware quirks (not a code dependency).
-- **[SondeHub](https://sondehub.org)** — global sonde tracking network.
-- **[Mirko Dalmonte (IZ4PNN)](https://download.farenight.it/MySondyGoAPI_V3.pdf)** — author of the MySondyGo API v3.0 specification, which Stratos's wire format implements.
+- **[BalloonHunter](https://github.com/SensorsIot/BalloonHunter)** — companion iOS/Android app (Andreas Spiess, HB9BLA). Stratos's primary BLE consumer.
+- **[`rs1729/RS`](https://github.com/rs1729/RS)** — *the* upstream open-source radiosonde decoder collection (GPL-2.0). Almost every open-source RS41/M10/M20/DFM/PILOT receiver — Stratos included — derives its demodulator and frame parser from this work. **Stratos's RS41 decoder is a port of `rs1729/RS`.** See [NOTICE.md](NOTICE.md) for full attribution.
+- **[`dl9rdz/rdz_ttgo_sonde`](https://github.com/dl9rdz/rdz_ttgo_sonde)** — sister project, cross-referenced for hardware quirks and SX1276 RS41 register values. Not a code dependency.
+- **[SondeHub](https://sondehub.org)** — global radiosonde tracking network.
+- **[Mirko Dalmonte (IZ4PNN)](https://download.farenight.it/MySondyGoAPI_V3.pdf)** — author of the MySondyGo API v3.0 specification, which Stratos's BLE wire format implements (no code copied — implemented from the published spec).
 
 ## 📜 License
 
-GPL-2.0 — required because the RS41 decoder is a port of `rs1729/RS` (GPL-2.0). See [LICENSE](LICENSE).
+**GPL-2.0** — see [LICENSE](LICENSE) for the full license text and [NOTICE.md](NOTICE.md) for the third-party-attribution summary.
+
+Stratos is licensed under GPL-2.0 because it incorporates code derived from `rs1729/RS` (GPL-2.0). As long as that derivation exists, the combined work must be distributed under GPL-2.0 or a later GPL version.

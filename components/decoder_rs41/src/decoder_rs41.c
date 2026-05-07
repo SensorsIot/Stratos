@@ -1,17 +1,34 @@
 /*
  * decoder_rs41 — Vaisala RS41 frame consumer.
  *
- * STATUS: framework. Reads bytes from the SX1276 byte queue, runs sync-byte
- * scanning, accumulates RS41 frame buffers, and publishes sonde_frame_t.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * The full rs1729 RS41 demodulator (Manchester decoding + Reed-Solomon +
- * field extraction) is not vendored in this commit. Phase 3 work in the FSD
- * (§3.3) covers porting it under GPL-2.0. Once vendored, replace the
- * stub fields produced by frame_parse_stub() with rs1729-derived values.
+ * Copyright (C) 2026 SensorsIot
  *
- * Until then, the decoder still emits NAME_ONLY frames when byte traffic is
- * detected on the queue, so the upper layers (state machine, BLE, OLED)
- * exercise their full code paths against synthetic frames.
+ * This file is part of Stratos.
+ * Stratos is free software: you can redistribute it and/or modify it under
+ * the terms of the GNU General Public License as published by the Free
+ * Software Foundation, either version 2 of the License, or (at your option)
+ * any later version. See the file LICENSE in the project root.
+ *
+ * Upstream attribution
+ * --------------------
+ * The RS41 demodulator (Manchester decode, frame sync, Reed-Solomon error
+ * correction, GPS / PTU / sub-frame field extraction) is ported from
+ *   rs1729/RS — https://github.com/rs1729/RS  (GPL-2.0)
+ * Author: rs1729.
+ * See NOTICE.md and docs/fsd/Stratos FSD.md §3.3 for full attribution
+ * details. As long as this file (or any other file derived from rs1729/RS)
+ * is included in Stratos, the combined work must be distributed under
+ * GPL-2.0 or a later GPL version.
+ *
+ * STATUS: framework. The current code is original to Stratos and runs
+ * sync-byte scanning + frame buffering only — it emits a NAME_ONLY
+ * placeholder frame so the upper layers (state machine, BLE codec, OLED)
+ * exercise their full code paths against synthetic frames. The actual
+ * rs1729 demodulator and frame parser will be vendored under
+ * components/decoder_rs41/rs1729/ in a follow-up commit (FSD §3.3,
+ * Phase 3) and replace frame_parse_stub() with rs1729-derived calls.
  */
 
 #include "decoder_rs41.h"

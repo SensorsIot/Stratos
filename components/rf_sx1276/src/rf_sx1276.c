@@ -31,11 +31,14 @@ static rf_profile_t        s_active_profile;
 
 static const rf_profile_t s_profiles[] = {
     {
+        /* Sync word matches dl9rdz/rdz_ttgo_sonde RS41.cpp (known-working
+           SX1276/SX1278 RS41 receiver). The earlier "0x10,0xB6,0xCA,..."
+           value is commented out in their source as an obsolete baseline. */
         .type        = SONDE_TYPE_RS41,
         .bitrate_bps = 4800,
         .freq_dev_hz = 4800,
-        .rxbw_hz     = 12500,    /* default; rxbw_idx 4 = 12.5 kHz */
-        .sync_word   = {0x10, 0xB6, 0xCA, 0x11, 0x22, 0x96, 0x12, 0xF8},
+        .rxbw_hz     = 12500,    /* rxbw_idx 4 = 12.5 kHz */
+        .sync_word   = {0x08, 0x6D, 0x53, 0x88, 0x44, 0x69, 0x48, 0x1F},
         .sync_len    = 8,
     },
     {
@@ -128,9 +131,12 @@ static void rx_task(void *arg)
 {
     (void)arg;
     /* On FifoLevel IRQ, drain bytes from the SX1276 FIFO (REG_FIFO).
-       Quantity is at least FIFO_THRESH+1; drain until FifoEmpty asserted. */
+       Quantity is at least FIFO_THRESH+1; drain until FifoEmpty asserted.
+       Independent of IRQs, poll RegRssiValue every loop so the API can
+       expose noise-floor RSSI even when no sync has fired yet — needed
+       for diagnosing whether the RF front-end is alive at all. */
     for (;;) {
-        if (xSemaphoreTake(s_irq_sem, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        if (xSemaphoreTake(s_irq_sem, pdMS_TO_TICKS(250)) == pdTRUE) {
             for (int i = 0; i < 64; i++) {
                 uint8_t flags2;
                 if (reg_read(0x3F, &flags2) != ESP_OK) break;  /* IrqFlags2 */
@@ -139,10 +145,10 @@ static void rx_task(void *arg)
                 if (reg_read(REG_FIFO, &b) != ESP_OK) break;
                 xQueueSend(s_bytes, &b, 0);
             }
-            uint8_t rssi;
-            if (reg_read(REG_RSSI_VALUE, &rssi) == ESP_OK) {
-                s_rssi_dbm = -((int16_t)rssi >> 1);
-            }
+        }
+        uint8_t rssi;
+        if (reg_read(REG_RSSI_VALUE, &rssi) == ESP_OK) {
+            s_rssi_dbm = -((int16_t)rssi >> 1);
         }
     }
 }
@@ -251,6 +257,18 @@ esp_err_t st_rf_apply_profile(const rf_profile_t *p)
     s_active_profile = *p;
     set_mode(MODE_STDBY);
 
+    /* LNA: max gain (G1=001) with HF boost on (LnaBoostHf=11) — the high-band
+       LNA needs the boost for ~3 dB extra sensitivity at 433 MHz. */
+    reg_write(REG_LNA, 0x23);
+
+    /* RegRxConfig = 0x1E: AfcAutoOn + AgcAutoOn + RxTrigger=PreambleDetect.
+       AutoRestartRx is set in RegSyncConfig (0x57) instead. Matches
+       dl9rdz/rdz_ttgo_sonde's known-working setting. */
+    reg_write(REG_RX_CONFIG, 0x1E);
+
+    /* RegPreambleDetect = 0xA8: detector on, size=2 bytes, tolerance=8 chips. */
+    reg_write(REG_PREAMBLE_DET, 0xA8);
+
     uint16_t br = (uint16_t)(FXOSC_HZ / p->bitrate_bps);
     reg_write(REG_BITRATE_MSB, (br >> 8) & 0xFF);
     reg_write(REG_BITRATE_LSB,  br       & 0xFF);
@@ -263,7 +281,12 @@ esp_err_t st_rf_apply_profile(const rf_profile_t *p)
     reg_write(REG_RXBW,   bw);
     reg_write(REG_AFC_BW, bw);
 
-    uint8_t sync_cfg = 0x10 | (p->sync_len ? ((p->sync_len - 1) & 0x07) : 0);
+    /* sync_cfg = 0x50 | (sync_len-1):
+       bits 7:6 = 01  AutoRestartRx ON without PLL re-sync
+       bit  4   = 1   SyncOn
+       bit  3   = 0   FIFO fills on sync match (default)
+       bits 2:0 = sync_len-1 (e.g. 7 → 8-byte sync). */
+    uint8_t sync_cfg = 0x50 | (p->sync_len ? ((p->sync_len - 1) & 0x07) : 0);
     if (p->sync_len) {
         for (uint8_t i = 0; i < p->sync_len; i++) {
             reg_write(REG_SYNC_VALUE1 + i, p->sync_word[i]);
