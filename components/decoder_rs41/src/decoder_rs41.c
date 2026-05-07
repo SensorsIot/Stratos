@@ -24,6 +24,7 @@
 
 #include "decoder_rs41.h"
 #include "rf_sx1276.h"
+#include "rs_ecc.h"
 
 #include <string.h>
 #include <math.h>
@@ -106,26 +107,91 @@ static inline uint8_t bitrev8(uint8_t b)
     return b;
 }
 
-/* Read frame[pos] from the post-sync raw buffer.
-   pos uses the full-frame convention (sync at 0..7, body at 8..). */
-static inline uint8_t fb(const uint8_t *raw, int pos)
+/* Read frame[pos] from a fully de-whitened body buffer.
+   pos uses the full-frame convention (sync header notionally at 0..7,
+   body[i] holds frame[i+8]). */
+static inline uint8_t fb(const uint8_t *body, int pos)
 {
     int idx = pos - 8;
     if (idx < 0 || idx >= FRAME_BYTES) return 0;
-    return bitrev8(raw[idx]) ^ PRBS_MASK[pos & 63];
+    return body[idx];
 }
 
-static inline int32_t read_i32_le(const uint8_t *raw, int pos)
+static inline int32_t read_i32_le(const uint8_t *body, int pos)
 {
     uint32_t v = 0;
-    for (int i = 0; i < 4; i++) v |= (uint32_t)fb(raw, pos + i) << (i * 8);
+    for (int i = 0; i < 4; i++) v |= (uint32_t)fb(body, pos + i) << (i * 8);
     return (int32_t)v;
 }
 
-static inline int16_t read_i16_le(const uint8_t *raw, int pos)
+static inline int16_t read_i16_le(const uint8_t *body, int pos)
 {
-    uint16_t v = (uint16_t)fb(raw, pos) | ((uint16_t)fb(raw, pos + 1) << 8);
+    uint16_t v = (uint16_t)fb(body, pos) | ((uint16_t)fb(body, pos + 1) << 8);
     return (int16_t)v;
+}
+
+/* RS41 frame layout for ECC purposes (positions are in the full frame
+   including the 8-byte sync header, which the SX1276 sync detector
+   consumed; our raw buffer starts at frame position 8):
+     frame[ 0.. 7] sync
+     frame[ 8..31] code-1 parity (24 bytes)
+     frame[32..55] code-2 parity (24 bytes)
+     frame[56..  ] interleaved data (even index → code 1, odd → code 2)
+   Each RS code carries 132 data bytes for a 320-byte frame, zero-padded
+   up to 231 data positions in the RS(255,231) codeword. The codeword
+   layout matches existing RS41 receivers: data fills positions 230..99
+   (decreasing) and parity fills 254..231 (decreasing). */
+static int build_codeword(const uint8_t *body, int parity_off, int data_off,
+                          uint8_t cw[255])
+{
+    memset(cw, 0, 255);
+    /* 132 interleaved data bytes — body[data_off + 2*i] for i in 0..131. */
+    for (int i = 0; i < 132; i++) cw[230 - i] = body[data_off + 2 * i];
+    /* 24 parity bytes — body[parity_off + i] for i in 0..23. */
+    for (int i = 0; i < 24;  i++) cw[254 - i] = body[parity_off + i];
+    return 0;
+}
+
+static void apply_codeword(const uint8_t cw[255], uint8_t *body,
+                           int parity_off, int data_off)
+{
+    for (int i = 0; i < 132; i++) body[data_off + 2 * i] = cw[230 - i];
+    for (int i = 0; i < 24;  i++) body[parity_off + i]   = cw[254 - i];
+}
+
+/* Diagnostic counters, written by rs_correct(); declared here so they're in
+   scope. Read via the decoder_rs41_last_* accessors near the bottom. */
+static volatile int s_last_rs_errs = -1;
+static volatile int s_last_synd1   = -1;
+static volatile int s_last_synd2   = -1;
+
+/* Build the full de-whitened frame body, then run RS(255,231) ECC on
+   both interleaved codewords. Stores total errors corrected (or -1 on
+   uncorrectable) at *errs_out. Records pre-correction syndrome counts
+   for diagnostic exposure. */
+static void rs_correct(const uint8_t *raw, uint8_t *body, int *errs_out)
+{
+    /* 1. Bit-reverse + PRBS-de-whiten every byte, materialising the body. */
+    for (int i = 0; i < FRAME_BYTES; i++) {
+        body[i] = bitrev8(raw[i]) ^ PRBS_MASK[(i + 8) & 63];
+    }
+
+    /* 2. Build, count, decode, apply each codeword. */
+    uint8_t cw[255];
+    int total = 0;
+    int n;
+
+    build_codeword(body, /*parity*/  0, /*data*/ 48, cw);
+    s_last_synd1 = rs_count_nonzero_syndromes(cw);
+    n = rs_decode_255_231(cw);
+    if (n >= 0) { apply_codeword(cw, body,  0, 48); total += n; }
+
+    build_codeword(body, /*parity*/ 24, /*data*/ 49, cw);
+    s_last_synd2 = rs_count_nonzero_syndromes(cw);
+    int n2 = rs_decode_255_231(cw);
+    if (n2 >= 0) { apply_codeword(cw, body, 24, 49); total += n2; }
+
+    *errs_out = (n < 0 || n2 < 0) ? -1 : total;
 }
 
 /* ECEF (meters) → WGS84 geodetic (degrees, meters). Iterative; converges
@@ -168,9 +234,14 @@ static void ecef_vel_to_local(double vx, double vy, double vz,
     *v_ms  = (float)vu;
 }
 
-/* Parse one 320-byte raw RS41 frame buffer. Returns true if SondeID
-   passes a printable-ASCII sanity check; the caller can assume *out is
-   ready to publish in that case. */
+int decoder_rs41_last_rs_errs(void) { return s_last_rs_errs; }
+int decoder_rs41_last_synd1(void)   { return s_last_synd1; }
+int decoder_rs41_last_synd2(void)   { return s_last_synd2; }
+
+/* Parse one 320-byte raw RS41 frame buffer. Runs Reed-Solomon ECC across
+   the two interleaved codewords first; if RS rejects (uncorrectable) we
+   bail out. Otherwise field extraction reads from the corrected body.
+   Returns true if the SondeID is valid alphanumeric; out is then ready. */
 static bool parse_frame(const uint8_t *raw, sonde_frame_t *out)
 {
     memset(out, 0, sizeof(*out));
@@ -178,16 +249,23 @@ static bool parse_frame(const uint8_t *raw, sonde_frame_t *out)
     out->rssi_dbm     = st_rf_rssi_dbm();
     out->monotonic_us = esp_timer_get_time();
 
-    /* SondeID: 8 chars, uppercase alphanumeric. RS41 serials are uniformly
-       uppercase letters + digits (e.g. R3651518). Reject the whole frame
-       if even one character fails the check — bit-corrupted frames easily
-       produce 5-7 valid chars, so a per-char threshold lets garbage
-       through. */
+    /* Run RS ECC. Body is the de-whitened frame body — possibly corrected
+       in place by rs_correct. If RS reports uncorrectable (-1) we fall
+       through to field extraction anyway: the strict alphanumeric ID
+       check still gates publish, so a bad frame can't slip through, and
+       the occasional intrinsically-clean frame still produces a result. */
+    uint8_t body[FRAME_BYTES];
+    int errs;
+    rs_correct(raw, body, &errs);
+    s_last_rs_errs = errs;
+
+    /* SondeID: 8 chars, uppercase alphanumeric. After RS correction this
+       check should virtually always pass for genuine RS41 frames. */
     char id[9] = {0};
     for (int i = 0; i < 8; i++) {
-        uint8_t b = fb(raw, POS_SONDEID + i);
+        uint8_t b = fb(body, POS_SONDEID + i);
         if (!((b >= '0' && b <= '9') || (b >= 'A' && b <= 'Z'))) {
-            return false;
+            return false;    /* RS-corrected but ID is not text — sync mis-align */
         }
         id[i] = (char)b;
     }
@@ -196,9 +274,9 @@ static bool parse_frame(const uint8_t *raw, sonde_frame_t *out)
     out->state = SONDE_STATE_NAME_ONLY;
 
     /* GPS ECEF position. Zero implies no fix yet. */
-    int32_t ex = read_i32_le(raw, POS_GPSecefX);
-    int32_t ey = read_i32_le(raw, POS_GPSecefY);
-    int32_t ez = read_i32_le(raw, POS_GPSecefZ);
+    int32_t ex = read_i32_le(body, POS_GPSecefX);
+    int32_t ey = read_i32_le(body, POS_GPSecefY);
+    int32_t ez = read_i32_le(body, POS_GPSecefZ);
     s_last_ecef_x = ex;
     s_last_ecef_y = ey;
     s_last_ecef_z = ez;
@@ -212,9 +290,9 @@ static bool parse_frame(const uint8_t *raw, sonde_frame_t *out)
             out->lon   = lon;
             out->alt_m = (int32_t)alt;
 
-            double vx = read_i16_le(raw, POS_GPSecefV + 0) / 100.0;
-            double vy = read_i16_le(raw, POS_GPSecefV + 2) / 100.0;
-            double vz = read_i16_le(raw, POS_GPSecefV + 4) / 100.0;
+            double vx = read_i16_le(body, POS_GPSecefV + 0) / 100.0;
+            double vy = read_i16_le(body, POS_GPSecefV + 2) / 100.0;
+            double vz = read_i16_le(body, POS_GPSecefV + 4) / 100.0;
             ecef_vel_to_local(vx, vy, vz, lat, lon,
                               &out->h_vel_kmh, &out->v_vel_ms);
             out->state = SONDE_STATE_TRACKING;

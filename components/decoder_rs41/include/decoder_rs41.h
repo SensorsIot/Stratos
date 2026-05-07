@@ -14,6 +14,18 @@ const decoder_vtable_t *decoder_rs41_vtable(void);
    has happened since boot. */
 void decoder_rs41_last_ecef(int32_t *x, int32_t *y, int32_t *z, uint32_t *age_ms_ago);
 
+/* Diagnostic: number of byte errors the Reed-Solomon decoder corrected in
+   the most recent parsed frame. -1 means RS rejected the frame (more than
+   12 errors per codeword); 0 means the frame was already clean. */
+int decoder_rs41_last_rs_errs(void);
+
+/* Diagnostic: pre-correction nonzero-syndrome counts for the two
+   interleaved codewords (range 0..24). 0 = codeword was already clean;
+   24 = every syndrome nonzero (often indicates a systematic mismatch in
+   how we extract the codeword from the frame, not actual RF errors). */
+int decoder_rs41_last_synd1(void);
+int decoder_rs41_last_synd2(void);
+
 #ifdef __cplusplus
 }
 #endif
