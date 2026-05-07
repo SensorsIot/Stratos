@@ -77,7 +77,7 @@ The radio chip on the board listens to the sonde's transmission. Software on the
 |---|---|
 | **LILYGO T3 V1.6** (TTGO LoRa32 V2.1_1.6) | 433 MHz variant. Identifiable by the silkscreen `LoRa32 V2.1 1.6`. ~€20 from LilyGO direct or major resellers. The board includes the ESP32, SX1276 radio, 0.96″ SSD1306 OLED, USB-C, and 18650 battery holder. Pinout reference: [LilyGO `utilities.h`](https://github.com/Xinyuan-LilyGO/LilyGo-LoRa-Series/blob/master/examples/ArduinoLoRa/LoRaSender/utilities.h). |
 | **433 MHz antenna** | λ/4 (~17 cm whip) or λ/2, SMA connector. Any cheap dipole works for nearby sondes; a tuned antenna helps at distance. |
-| **USB-C cable** | For flashing and primary power. |
+| **USB cable** | For flashing and primary power. |
 | **18650 Li-Ion cell** *(optional)* | Slots into the on-board holder for portable use. |
 
 ## 🚀 Quick Start
