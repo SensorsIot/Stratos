@@ -17,6 +17,7 @@ idf_component_register(
         rf_sx1276
         decoder_core
         decoder_rs41
+        decoder_m10
         sonde_state
         stratos_codec
 )

@@ -53,12 +53,18 @@ static const rf_profile_t s_profiles[] = {
         .sync_len    = 2,
     },
     {
+        /* M10/M20: GFSK 9600 bps, fdev ±2.4 kHz (in chip units we
+           over-set to 9600 for slicer headroom, matching rdz_ttgo_sonde),
+           RxBw 25 kHz. Sync = single byte 0x66 — the M10 protocol's
+           preamble is repeated 0x55, which after bit-reversal aligns
+           with 0xAA in our register; a single-byte 0x66 sync is what
+           rdz uses successfully in the field. */
         .type        = SONDE_TYPE_M10,
         .bitrate_bps = 9600,
         .freq_dev_hz = 9600,
         .rxbw_hz     = 25000,
-        .sync_word   = {0x66, 0x65},
-        .sync_len    = 2,
+        .sync_word   = {0x66},
+        .sync_len    = 1,
     },
     {
         .type        = SONDE_TYPE_DFM,

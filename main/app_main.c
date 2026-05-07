@@ -29,6 +29,7 @@
 #include "rf_sx1276.h"
 #include "decoder_core.h"
 #include "decoder_rs41.h"
+#include "decoder_m10.h"
 #include "sonde_state.h"
 
 static const char *TAG = "stratos";
@@ -118,6 +119,7 @@ void app_main(void)
     if (st_rf_init() == ESP_OK) {
         st_rf_set_freq_hz(cfg.freq_khz * 1000U);
         decoder_core_register(decoder_rs41_vtable());
+        decoder_core_register(decoder_m10_vtable());
         decoder_core_set_active(cfg.sonde_type, st_rf_byte_queue());
         st_rf_start_rx();
     } else {
