@@ -4,9 +4,9 @@
 ![Platform](https://img.shields.io/badge/platform-ESP32-blue)
 ![Framework](https://img.shields.io/badge/framework-ESP--IDF%20v5.5-red)
 ![Hardware](https://img.shields.io/badge/board-LILYGO%20T3%20V1.6-orange)
-![Status](https://img.shields.io/badge/status-v0%20draft-yellow)
+![Status](https://img.shields.io/badge/status-decoding%20live%20RS41-brightgreen)
 
-> **Status:** v0 — under active development. Specification at [docs/fsd/Stratos FSD.md](docs/fsd/Stratos%20FSD.md). Companion app: [BalloonHunter](https://github.com/SensorsIot/BalloonHunter).
+> **Status:** working — receiver decodes live Vaisala RS41 telemetry end-to-end (radio → frame parser → Reed-Solomon ECC → GPS → OLED + BLE + web UI). Verified against a real sonde at 403.500 MHz: `state=TRACKING`, valid serial, lat/lon/alt accurate to GPS noise, `rs_errs=0` on clean codewords. Specification at [docs/fsd/Stratos FSD.md](docs/fsd/Stratos%20FSD.md). Companion app: [BalloonHunter](https://github.com/SensorsIot/BalloonHunter).
 
 ## 🎈 The Problem
 
@@ -24,9 +24,9 @@ Buy the board, flash this firmware, attach a 433 MHz antenna, open BalloonHunter
 
 ## ✨ What It Does
 
-- Tunes a single 433 MHz channel and decodes Vaisala **RS41** radiosondes.
-- Streams the decoded telemetry — name, latitude, longitude, altitude, horizontal/vertical velocity, signal strength — over Bluetooth Low Energy to BalloonHunter (or any MySondyGo-aware app).
-- Shows the same data locally on the on-board OLED.
+- Tunes a single 433 MHz channel and decodes Vaisala **RS41** radiosondes — full pipeline: SX1276 FSK RX → bit-reverse → PRBS de-whitening → Reed-Solomon ECC (RS(255, 231) over GF(2⁸)) → frame field extraction → ECEF→WGS84 conversion.
+- Streams the decoded telemetry — serial, latitude, longitude, altitude, horizontal/vertical velocity, signal strength — over Bluetooth Low Energy to BalloonHunter (or any MySondyGo-aware app).
+- Shows the same data locally on the on-board OLED with a 60-second sticky display so marginal-signal flicker doesn't reach the user.
 - Exposes a configuration web page on its own WiFi access point. The receiver never joins a home network — it is its own AP.
 - Saves all settings in NVS; recovers gracefully from a wiped or corrupted config.
 - Updates its own firmware over WiFi by uploading a `.bin` file from the browser (with automatic rollback if the new image fails to boot).
@@ -129,7 +129,10 @@ There is no STA mode, no GitHub-pull update path, and no auto-update.
 | OLED stays blank, log shows `no SSD1306 ACK` | I²C bus issue (loose pin, wrong board variant) | Check SDA=21, SCL=22 are connected; confirm the board is a T3 V1.6 (this firmware does not support older T3 V1.3 pinout). |
 | `rst:0x1 (POWERON_RESET)` reboot loop right after boot | Board profile lists a non-existent OLED reset pin | Confirm `oled_rst` is `GPIO_NUM_NC` in `components/board_profile/src/board_profile.c`. T3 V1.6 has no OLED reset wire. |
 | BalloonHunter sees the device but no telemetry | Frequency mis-set; antenna disconnected; no sonde in range | Open the web UI, verify frequency matches a known active sonde launch. RSSI on the OLED status screen confirms signal. |
+| `state` stays `NAME_ONLY` even with strong signal — `lat/lon = 0` and `rs_errs = -1` | RS41 frames being truncated/spliced by the radio driver | Confirm SX1276 `PAYLOAD_LEN` is 312 (9-bit form: `PACKET_CONFIG2[2:0] = 1`, `PAYLOAD_LEN = 0x38`) and the FIFO drain task polls every ~30 ms (the 64-byte FIFO fills in ~107 ms at 4800 bps). |
+| `state = TRACKING` but `h_kmh` shows tens of km/h on a stationary sonde | Velocity unit assumed cm/s when it should be mm/s | Verified empirically: RS41 ECEF velocity is mm/s. Already fixed in `decoder_rs41.c`. |
 | Browser upload of `.bin` fails | Image too large, or wrong target | The OTA slot is 1.5 MB. Confirm you're uploading the `stratos.bin` for ESP32 (not a different target). |
+| `Image hash failed - image is corrupt` after a flash | esptool's "Hash of data verified" can pass while one byte is unwritten if you use `erase=1` then a partial write right after | `idf.py fullclean && idf.py build` then full chip erase via esptool, then re-flash with `erase=1`. Single missing byte in the SHA256 trailer is enough to trigger this. |
 
 ## 📂 Files
 
@@ -169,7 +172,7 @@ There is no STA mode, no GitHub-pull update path, and no auto-update.
 |---|---|
 | RTOS / framework | **ESP-IDF v5.5** (FreeRTOS). No Arduino-core compatibility shim. |
 | Radio | **Semtech SX1276** in raw FSK continuous-RX mode (not LoRa). Custom SPI driver, sync-word matching, FIFO drain on `DIO0` interrupt. |
-| Decoder | Original RS41 parser. Protocol facts (PRBS whitening, frame layout, ECEF→WGS84) per the publicly documented air protocol; **[`rs1729/RS`](https://github.com/rs1729/RS)** is the canonical reference. |
+| Decoder | Original RS41 parser + Reed-Solomon ECC. Two interleaved RS(255, 231) codewords over GF(2⁸), primitive polynomial `0x11D`, generator roots α⁰…α²³. Protocol facts (PRBS whitening, sync word, frame layout, ECEF→WGS84, mm/s velocity scale) per the publicly documented air protocol; **[`rs1729/RS`](https://github.com/rs1729/RS)** is the canonical reference. |
 | Bluetooth | **NimBLE** host stack (built into ESP-IDF). Exposes the Nordic UART Service (NUS); Stratos's MySondyGo-v3.0-compatible ASCII protocol rides on top. |
 | OLED | SSD1306 driver via the IDF `i2c_master` API (page-addressing mode). |
 | Web | ESP-IDF `esp_http_server`. Single-page HTML embedded in firmware via `EMBED_TXTFILES` — no SPIFFS / LittleFS partition. |

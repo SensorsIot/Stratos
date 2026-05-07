@@ -1,10 +1,14 @@
 # Stratos — Functional Specification Document (FSD)
 
 **Repository:** [SensorsIot/Stratos](https://github.com/SensorsIot/Stratos)
-**Status:** Draft v0.1 (initial generation, 2026-05-06)
+**Status:** v0.2 — receiver decoding live RS41 telemetry end-to-end (2026-05-07).
+Phases 1–4 implemented and verified on hardware against a real Vaisala RS41
+on 403.500 MHz: SX1276 sync match @ 1 Hz, Reed-Solomon ECC clean, GPS
+TRACKING with sub-metre lat/lon stability and stationary-noise-level
+velocities. Phase 5 (OTA, hardening) partial.
 **License:** GPL-2.0 (firmware is original code; rs1729/RS is the public protocol reference)
-**Target hardware:** LILYGO® TTGO LoRa32 V2.1_1.6 (ESP32 + Semtech SX1276, 433 MHz, on-board SSD1306 OLED)
-**Build system:** Espressif ESP-IDF (latest stable)
+**Target hardware:** LILYGO® TTGO LoRa32 V2.1_1.6 / T3 V1.6 (ESP32 + Semtech SX1276, 433 MHz, on-board SSD1306 OLED — no OLED reset pin)
+**Build system:** Espressif ESP-IDF v5.5
 
 ---
 
@@ -196,6 +200,15 @@ Total cold boot to "device usable" target: ≤ 5 s.
 ---
 
 ## 3. Implementation Phases
+
+**Phase status (as of 2026-05-07):**
+| Phase | Title | Status |
+|---|---|---|
+| 1 | Hardware bring-up & infrastructure | ✅ done |
+| 2 | RF receiver | ✅ done |
+| 3 | RS41 decoder | ✅ done |
+| 4 | Stratos BLE protocol | ✅ done |
+| 5 | OTA, hardening, V&V | 🟡 partial — OTA upload + rollback in place; soak tests outstanding |
 
 ### 3.1 Phase 1 — Hardware bring-up & infrastructure
 
@@ -478,9 +491,9 @@ The receiver never makes outbound HTTPS requests. All OTA goes through the opera
 
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
-| **R-1** Stratos defines its own GATT UUIDs (the MySondyGo API PDF specifies the application protocol but not the GATT layer). | Med | Med | Stratos exposes the standard Nordic UART Service (NUS) UUIDs (`6E400001-…`) on which the ASCII protocol rides. BalloonHunter targets these UUIDs. Other MySondyGo-aware clients that hard-code different service UUIDs may need a one-line patch. |
-| **R-2** SX1276 FSK config quirks — sync-word matching, deviation, and RX BW interactions are not always documented; bench-tuning may be required per sonde type. | Medium | Medium | Allocate 2 days of bench time in Phase 2 with a known RS41 capture; document the working register values per sonde type as a baseline. |
-| **R-3** RS41 protocol facts (PRBS sequence, sync word, frame offsets, ECEF math) come from public references. A misread fact silently corrupts every decoded frame. | Med | Med | Validate decoded GPS coords against SondeHub for known launches; cross-check serial numbers against the printed labels on real sondes. |
+| **R-1** Stratos defines its own GATT UUIDs (the MySondyGo API PDF specifies the application protocol but not the GATT layer). | Med | Med | **CLOSED.** Stratos exposes the standard Nordic UART Service (NUS) UUIDs (`6E400001-…`) on which the ASCII protocol rides. BalloonHunter connects without modification. Other MySondyGo-aware clients that hard-code different service UUIDs may need a one-line patch. |
+| **R-2** SX1276 FSK config quirks — sync-word matching, deviation, and RX BW interactions are not always documented; bench-tuning may be required per sonde type. | Medium | Medium | **CLOSED.** Working register values for RS41: bitrate 4800, fdev 4800 Hz, RxBw 12.5 kHz, sync `0x08,0x6D,0x53,0x88,0x44,0x69,0x48,0x1F` (8 bytes), RegRxConfig `0x1E`, RegSyncConfig `0x57`, RegPreambleDet `0xA8`, LNA `0x23` (max gain + HF boost). DIO0 mapped to **PayloadReady** (00); FifoLevel is unrouted on T3 V1.6. PAYLOAD_LEN must be **312 bytes** (9-bit form: PACKET_CONFIG2[2:0]=1, PAYLOAD_LEN=0x38) — at the default 255 the radio truncates frames mid-RS-codeword and ECC fails on every frame. The 64-byte FIFO drain task must poll at ≤ 30 ms intervals — 250 ms causes overflow at 4800 bps. |
+| **R-3** RS41 protocol facts (PRBS sequence, sync word, frame offsets, ECEF math) come from public references. A misread fact silently corrupts every decoded frame. | Med | Med | **CLOSED.** All facts validated empirically: PRBS mask, RS(255,231) layout (parity at frame[8..31]/[32..55], data interleaved at frame[56..]), Phil-Karn-style codeword convention (parity at cw[0..23] HIGH degrees, data at cw[24..254] descending degrees — implemented by reversing into our low-degree-first decoder), ECEF position in cm and **velocity in mm/s**. Cross-check against rs1729's public reference matches byte-for-byte. |
 | **R-4** BLE + WiFi coexistence on shared 2.4 GHz radio. | Low | Medium | Standard ESP32 dual-mode is well supported; allocate one dedicated soak test in Phase 5 (NFR-2.1). |
 | **R-5** No real sonde available for testing during dry seasons / non-launch windows. | Medium | Medium | Record I/Q with rtl-sdr during a launch window; replay through the SX1276 via attenuator and dummy-load coupling, or via a second SX1276 in TX mode (test rig only — not the production firmware). |
 | **R-6** Flash / RAM pressure when adding NimBLE + WiFi + httpd + OLED + decoder. | Low | Medium | Budget early (target build ≤ 70 % of 4 MB flash, ≤ 60 % of 320 KB heap at idle). Profile in Phase 1. |
@@ -499,6 +512,44 @@ The receiver never makes outbound HTTPS requests. All OTA goes through the opera
 - (assumed) **OTA signing** is OFF by default in v1 (image header validation only). Signed-OTA is a v1.1 hardening item.
 - (assumed) **`tipo=4` PILOT** maps to no decoder; the device responds to settings queries with `tipo=4` but produces only `0/.../o` heartbeat frames.
 - (assumed) **Decoded `BAT%` and `BATV`**: when no battery is present, `BAT%=-1`, `BATV=0`. When battery is present, computed from the GPIO35 voltage divider (2:1) with `vBatMin`/`vBatMax`/`vBatType` curves per FR-5b.x. Default `vBatMax=4200 mV` (project choice) rather than the API's `4180 mV`.
+
+### 5.2.1 Hard-won implementation facts (from bring-up against a real RS41)
+
+These are non-obvious facts that future maintainers will lose hours
+re-discovering if they're not written down here:
+
+- **OLED has no reset pin on T3 V1.6.** `OLED_RST` is `UNUSED_PIN` per
+  LilyGO's pinout. The earlier board profile assumed `GPIO_NUM_16`; driving
+  GPIO 16 LOW for an "OLED reset" pulse glitches the 3V3 rail enough that
+  the ESP32 sees a clean power-on (`rst:0x1`) and reboots. `oled_rst` must
+  be `GPIO_NUM_NC` and the I²C driver must skip any reset pulse.
+- **DIO0 mapping = `00` (PayloadReady), not `01` (CrcOk).** In FSK Packet
+  Mode RX the SX1276's DIO0 mapping `01` means CrcOk — useless when CRC
+  is disabled. We need PayloadReady. FifoLevel is on DIO1 which isn't
+  routed on this board.
+- **`PAYLOAD_LEN` must be 312 bytes** (the RS41 frame body, post-sync).
+  At the default 8-bit value `255`, the radio truncates each packet
+  mid-frame and the next packet's first 57 bytes get spliced into the
+  buffer, breaking RS ECC. 9-bit form: `PACKET_CONFIG2[2:0] = 1`,
+  `PAYLOAD_LEN = 0x38`.
+- **FIFO drain task must poll at ≤ 30 ms.** The 64-byte FIFO fills in
+  ~107 ms at 4800 bps. PayloadReady IRQ only fires once per frame
+  (~520 ms), so between IRQs the FIFO would overflow. Tight polling
+  prevents byte loss.
+- **RS41 ECEF velocity is mm/s, not cm/s.** rs1729's source prints raw
+  i16 values without unit annotation; some references say cm/s. Verified
+  empirically: a stationary sonde reports raw `|v| ~ 50–200`, which only
+  scales to plausible m/s if divided by 1000.
+- **Reed-Solomon convention: Phil Karn / libfec.** Codeword bytes index
+  0 = highest polynomial degree. Our textbook decoder is low-degree-first,
+  so the codeword must be reversed at extraction (parity at `cw[0..23]`
+  reversed, data interleaved at `cw[123..254]` reversed, zero pad at
+  `cw[24..122]`). Generator: `0x11D`, α = 2, FCR = 0, 24 roots, RS(255,231).
+- **OLED display stickiness, not just spec compliance.** Marginal-signal
+  reception produces alternating clean/dirty frames at ~1 Hz; without a
+  60-second sticky window the OLED flickers between the real serial and
+  "-- searching --" once per second. The decoder publishes the last good
+  frame for `STICKY_LOCK_US = 60 s` even when validation fails.
 
 ### 5.3 External Dependencies
 
