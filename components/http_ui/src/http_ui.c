@@ -15,6 +15,7 @@
 #include "platform_common.h"
 #include "sonde_types.h"
 #include "rf_sx1276.h"
+#include "decoder_rs41.h"
 
 extern const uint8_t index_html_start[] asm("_binary_index_html_start");
 extern const uint8_t index_html_end[]   asm("_binary_index_html_end");
@@ -75,6 +76,10 @@ static esp_err_t h_state(httpd_req_t *req)
     char buf[512];
     sonde_frame_t f = s_last_frame;
     st_config_t   c = st_config_get();
+    int32_t  ecef_x = 0, ecef_y = 0, ecef_z = 0;
+    uint32_t ecef_age_ms = 0xFFFFFFFFu;
+    decoder_rs41_last_ecef(&ecef_x, &ecef_y, &ecef_z, &ecef_age_ms);
+
     int n = snprintf(buf, sizeof(buf),
         "{"
         "\"state\":\"%s\","
@@ -86,6 +91,7 @@ static esp_err_t h_state(httpd_req_t *req)
         "\"rssi_dbm\":%d,\"afc_hz\":%ld,"
         "\"bat_pct\":-1,\"bat_mv\":0,"
         "\"rf_bytes\":%lu,\"rf_sync\":%lu,"
+        "\"ecef_x\":%ld,\"ecef_y\":%ld,\"ecef_z\":%ld,\"ecef_age_ms\":%lu,"
         "\"version\":\"%s\","
         "\"uptime_s\":%lld"
         "}",
@@ -98,6 +104,7 @@ static esp_err_t h_state(httpd_req_t *req)
         f.rssi_dbm, (long)f.afc_hz,
         (unsigned long)st_rf_byte_count(),
         (unsigned long)st_rf_sync_count(),
+        (long)ecef_x, (long)ecef_y, (long)ecef_z, (unsigned long)ecef_age_ms,
         st_version_string(),
         esp_timer_get_time() / 1000000LL);
     if (n < 0 || n >= (int)sizeof(buf)) return ESP_FAIL;

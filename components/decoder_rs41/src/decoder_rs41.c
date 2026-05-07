@@ -51,6 +51,28 @@ static TaskHandle_t  s_task;
 static QueueHandle_t s_q;
 static volatile bool s_running;
 
+/* Last raw ECEF values seen by the parser (for diagnostic exposure via
+   the HTTP API). Only updated when parse_frame succeeds. */
+static volatile int32_t s_last_ecef_x;
+static volatile int32_t s_last_ecef_y;
+static volatile int32_t s_last_ecef_z;
+static volatile uint32_t s_last_parse_us_div1k; /* timestamp of last clean parse, /1000 to fit in uint32 */
+
+void decoder_rs41_last_ecef(int32_t *x, int32_t *y, int32_t *z, uint32_t *age_ms_ago)
+{
+    if (x) *x = s_last_ecef_x;
+    if (y) *y = s_last_ecef_y;
+    if (z) *z = s_last_ecef_z;
+    if (age_ms_ago) {
+        if (s_last_parse_us_div1k == 0) {
+            *age_ms_ago = 0xFFFFFFFFu;
+        } else {
+            uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000LL);
+            *age_ms_ago = now_ms - s_last_parse_us_div1k;
+        }
+    }
+}
+
 /* RS41 PRBS whitening sequence — a hardware-defined constant of the
    transmit chain. Values per the publicly-documented RS41 protocol. */
 static const uint8_t PRBS_MASK[64] = {
@@ -177,6 +199,10 @@ static bool parse_frame(const uint8_t *raw, sonde_frame_t *out)
     int32_t ex = read_i32_le(raw, POS_GPSecefX);
     int32_t ey = read_i32_le(raw, POS_GPSecefY);
     int32_t ez = read_i32_le(raw, POS_GPSecefZ);
+    s_last_ecef_x = ex;
+    s_last_ecef_y = ey;
+    s_last_ecef_z = ez;
+    s_last_parse_us_div1k = (uint32_t)(esp_timer_get_time() / 1000LL);
     if (ex != 0 || ey != 0 || ez != 0) {
         double lat, lon, alt;
         ecef_to_wgs84(ex / 100.0, ey / 100.0, ez / 100.0, &lat, &lon, &alt);
