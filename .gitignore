@@ -1,22 +1,22 @@
 # ESP-IDF build artifacts
 build/
-managed_components/
-sdkconfig
 sdkconfig.old
+managed_components/
 dependencies.lock
 
-# Editor/OS
-.vscode/
-.idea/
-.DS_Store
-*.swp
-*~
-
-# Python (idf.py helpers)
+# Python
 __pycache__/
 *.pyc
+.venv/
 
-# Local secrets / overrides
-*.local
-.env
-secrets.h
+# Editor / OS
+.vscode/
+.DS_Store
+
+# Claude runtime state inside workspace .claude/
+.claude/*
+!.claude/skills/
+!.claude/commands/
+
+# Claude data persistence (credentials, sessions, history)
+.claude-data/

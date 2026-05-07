@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Stratos Receiver</title>
+<style>
+:root { --fg:#ddd; --bg:#111; --bg2:#1d1d1d; --acc:#5cc; --warn:#fa3; --err:#f55; }
+* { box-sizing: border-box; }
+body { font:14px/1.4 system-ui,sans-serif; color:var(--fg); background:var(--bg); margin:0; padding:0; }
+header { background:var(--bg2); padding:12px 16px; border-bottom:1px solid #333; }
+h1 { font-size:1.2em; margin:0; color:var(--acc); }
+main { padding:12px; max-width:760px; margin:auto; }
+section { background:var(--bg2); margin:12px 0; padding:12px 14px; border-radius:6px; border:1px solid #333; }
+h2 { margin:0 0 8px; font-size:1em; color:var(--acc); }
+label { display:block; margin:6px 0 2px; font-size:.9em; color:#aaa; }
+input,select,button { font:inherit; padding:6px 8px; border:1px solid #444; border-radius:4px; background:#222; color:var(--fg); width:100%; }
+button { background:var(--acc); color:#000; border-color:var(--acc); cursor:pointer; font-weight:600; }
+button.secondary { background:#333; color:var(--fg); border-color:#444; }
+button.danger { background:var(--err); color:#fff; border-color:var(--err); }
+.row { display:flex; gap:8px; }
+.row > * { flex:1; }
+.kv { display:grid; grid-template-columns:max-content 1fr; gap:4px 12px; font-family:ui-monospace,monospace; font-size:.9em; }
+.kv span:nth-child(odd) { color:#888; }
+progress { width:100%; height:14px; }
+#log { font:11px ui-monospace,monospace; white-space:pre-wrap; max-height:160px; overflow:auto; background:#000; padding:6px; border-radius:4px; }
+.bad { color:var(--err); }
+.ok { color:var(--acc); }
+</style>
+</head>
+<body>
+<header><h1>Stratos Balloon Receiver</h1></header>
+<main>
+
+<section>
+  <h2>Live status</h2>
+  <div class="kv" id="status"></div>
+</section>
+
+<section>
+  <h2>Configuration</h2>
+  <form id="cfg">
+    <label>Frequency (MHz)</label>
+    <input name="freq_mhz" type="number" step="0.001" min="137.200" max="524.800">
+    <label>Sonde type</label>
+    <select name="sonde_type">
+      <option value="1">RS41</option><option value="2">M20</option>
+      <option value="3">M10</option><option value="4">PILOT</option>
+      <option value="5">DFM</option>
+    </select>
+    <label>MYCALL</label><input name="mycall" maxlength="8">
+    <label>BLE</label>
+    <select name="ble_on"><option value="1">on</option><option value="0">off</option></select>
+    <h2 style="margin-top:14px">Battery calibration</h2>
+    <div class="row">
+      <div><label>vBatMin (mV)</label><input name="vbat_min_mv" type="number" min="2000" max="5000"></div>
+      <div><label>vBatMax (mV)</label><input name="vbat_max_mv" type="number" min="2000" max="5000"></div>
+    </div>
+    <label>Curve</label>
+    <select name="vbat_type">
+      <option value="0">Linear</option><option value="1">Sigmoidal</option>
+      <option value="2">Anti-sigmoidal</option>
+    </select>
+    <div class="row" style="margin-top:10px">
+      <button type="submit">Save</button>
+      <button type="button" id="reload" class="secondary">Reload</button>
+    </div>
+  </form>
+</section>
+
+<section>
+  <h2>Firmware update</h2>
+  <p style="margin:0 0 8px;color:#aaa">Current: <span id="ver">…</span></p>
+  <div class="row">
+    <button id="ghBtn" class="secondary">Update from GitHub</button>
+    <button id="fileBtn" class="secondary">Upload .bin</button>
+  </div>
+  <input id="binFile" type="file" accept=".bin" hidden>
+  <progress id="otaProg" value="0" max="100" style="margin-top:10px;display:none"></progress>
+  <div id="otaMsg" style="margin-top:6px"></div>
+</section>
+
+<section>
+  <h2>Danger zone</h2>
+  <button id="resetBtn" class="danger">Factory reset</button>
+</section>
+
+<section><h2>Log</h2><div id="log"></div></section>
+
+</main>
+<script>
+const $ = q => document.querySelector(q);
+const log = m => { const l=$('#log'); l.textContent += m+'\n'; l.scrollTop = l.scrollHeight; };
+
+async function loadState() {
+  try {
+    const r = await fetch('/api/state'); const s = await r.json();
+    const k = $('#status'); k.innerHTML = '';
+    const add = (a,b) => { k.innerHTML += `<span>${a}</span><span>${b}</span>`; };
+    add('state', s.state); add('type', s.type); add('freq', (s.freq_khz/1000).toFixed(3)+' MHz');
+    add('name', s.name||'—'); add('lat', s.lat); add('lon', s.lon);
+    add('alt_m', s.alt_m); add('rssi', s.rssi_dbm+' dBm');
+    add('battery', s.bat_mv+' mV ('+s.bat_pct+'%)');
+    add('uptime_s', s.uptime_s); $('#ver').textContent = s.version;
+  } catch(e) { log('state err: '+e); }
+}
+async function loadCfg() {
+  const r = await fetch('/api/config'); const c = await r.json();
+  const f = $('#cfg');
+  f.freq_mhz.value = (c.freq_khz/1000).toFixed(3);
+  f.sonde_type.value = c.sonde_type;
+  f.mycall.value = c.mycall;
+  f.ble_on.value = c.ble_on ? 1 : 0;
+  f.vbat_min_mv.value = c.vbat_min_mv;
+  f.vbat_max_mv.value = c.vbat_max_mv;
+  f.vbat_type.value = c.vbat_type;
+}
+$('#cfg').addEventListener('submit', async e => {
+  e.preventDefault();
+  const f = e.target;
+  const body = {
+    freq_khz: Math.round(parseFloat(f.freq_mhz.value)*1000),
+    sonde_type: parseInt(f.sonde_type.value, 10),
+    mycall: f.mycall.value,
+    ble_on: f.ble_on.value === '1',
+    vbat_min_mv: parseInt(f.vbat_min_mv.value, 10),
+    vbat_max_mv: parseInt(f.vbat_max_mv.value, 10),
+    vbat_type: parseInt(f.vbat_type.value, 10),
+  };
+  const r = await fetch('/api/config', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify(body)});
+  log(r.ok ? 'config saved' : 'config save failed: '+r.status);
+});
+$('#reload').addEventListener('click', () => { loadCfg(); loadState(); });
+$('#resetBtn').addEventListener('click', async () => {
+  if (!confirm('Erase all settings and reboot?')) return;
+  await fetch('/api/factory-reset', {method:'POST'});
+  log('factory reset triggered');
+});
+function setOtaMsg(m, cls) { const e=$('#otaMsg'); e.textContent=m; e.className=cls||''; }
+async function uploadBin(blob) {
+  setOtaMsg('uploading…'); $('#otaProg').style.display='block'; $('#otaProg').value=0;
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/api/ota/upload');
+  xhr.upload.onprogress = ev => { if (ev.lengthComputable) $('#otaProg').value = ev.loaded/ev.total*100; };
+  xhr.onload = () => {
+    if (xhr.status === 202 || xhr.status === 200) setOtaMsg('done — rebooting', 'ok');
+    else setOtaMsg('failed: '+xhr.status+' '+xhr.responseText, 'bad');
+  };
+  xhr.onerror = () => setOtaMsg('upload error', 'bad');
+  xhr.send(blob);
+}
+$('#fileBtn').addEventListener('click', () => $('#binFile').click());
+$('#binFile').addEventListener('change', e => { if (e.target.files[0]) uploadBin(e.target.files[0]); });
+$('#ghBtn').addEventListener('click', async () => {
+  setOtaMsg('querying GitHub…');
+  try {
+    const r = await fetch('https://api.github.com/repos/SensorsIot/Stratos/releases/latest');
+    if (!r.ok) throw new Error('GitHub HTTP '+r.status);
+    const j = await r.json();
+    const asset = j.assets.find(a => a.name.endsWith('.bin'));
+    if (!asset) { setOtaMsg('no .bin in latest release', 'bad'); return; }
+    setOtaMsg('downloading '+asset.name+' ('+asset.size+' B)…');
+    const br = await fetch(asset.browser_download_url);
+    if (!br.ok) throw new Error('asset HTTP '+br.status);
+    const blob = await br.blob();
+    await uploadBin(blob);
+  } catch(e) { setOtaMsg('error: '+e.message, 'bad'); }
+});
+
+loadCfg(); loadState(); setInterval(loadState, 1500);
+</script>
+</body>
+</html>

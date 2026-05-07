@@ -1,6 +1,6 @@
-# Balloon-Receiver — Functional Specification Document (FSD)
+# Stratos — Functional Specification Document (FSD)
 
-**Repository:** [SensorsIot/Balloon-Receiver](https://github.com/SensorsIot/Balloon-Receiver)
+**Repository:** [SensorsIot/Stratos](https://github.com/SensorsIot/Stratos)
 **Status:** Draft v0.1 (initial generation, 2026-05-06)
 **License:** GPL-2.0 (firmware contains derivative work of `rs1729/RS`)
 **Target hardware:** LILYGO® TTGO LoRa32 V2.1_1.6 (ESP32 + Semtech SX1276, 433 MHz, on-board SSD1306 OLED)
@@ -12,26 +12,28 @@
 
 ### 1.1 Purpose
 
-Balloon-Receiver is a single-board, fixed-frequency radiosonde receiver. It demodulates and decodes a single Vaisala RS41 radiosonde transmission from a configured 433 MHz channel, and exposes the decoded telemetry to a smartphone via Bluetooth Low Energy using the MySondy Go API v3.0 ASCII protocol. A built-in web page allows the operator to configure the listen frequency and other settings over WiFi.
+Stratos is a single-board, fixed-frequency weather-balloon (radiosonde) receiver. It demodulates and decodes a single Vaisala RS41 radiosonde transmission from a configured 433 MHz channel, and exposes the decoded telemetry to a smartphone via Bluetooth Low Energy. Stratos is the BLE hardware companion to **[BalloonHunter](https://github.com/SensorsIot/BalloonHunter)**, an iOS/Android app for tracking and recovering weather balloons. A built-in web page allows the operator to configure the listen frequency and other settings over WiFi.
+
+The on-wire BLE payload is wire-compatible with the MySondyGo API v3.0 ASCII protocol — see §6 — so any MySondyGo-aware app (BalloonHunter included) connects without modification. This is a compatibility property of Stratos's protocol, not its reason for being.
 
 ### 1.2 Problem Statement
 
-Existing open-source ESP32 radiosonde receivers (e.g. `dl9rdz/rdz_ttgo_sonde`) bundle many features (multi-band scanning, KISS TNC, AXUDP, MQTT, SondeHub, Chasemapper, multiple display drivers) that are unnecessary for a focused field-receiver use case. The closed-source MySondy Go firmware is feature-appropriate but proprietary, and does not expose source code. There is no minimal, open, ESP-IDF-native radiosonde receiver that pairs cleanly with the existing MySondy Go Android app. This project fills that gap.
+Existing open-source ESP32 radiosonde receivers (e.g. `dl9rdz/rdz_ttgo_sonde`) bundle many features (multi-band scanning, KISS TNC, AXUDP, MQTT, SondeHub, Chasemapper, multiple display drivers) that are unnecessary for a focused field-receiver use case. Stratos provides a minimal, open, ESP-IDF-native receiver paired with a single companion app (BalloonHunter), keeping firmware scope tight and the protocol surface small.
 
 ### 1.3 Users / Stakeholders
 
 | Stakeholder | Role |
 |---|---|
-| **Sonde chaser** (primary user) | Carries the device into the field, pairs phone via the MySondy Go Android app, follows the sonde to landing. |
+| **Sonde chaser** (primary user) | Carries the device into the field, pairs phone via the BalloonHunter app, follows the sonde to landing. |
 | **Hobby operator / contributor** | Builds, flashes, and modifies the firmware. Adds future decoders. |
-| **Mirko Dalmonte (IZ4PNN)** | Author of the MySondy Go Android app and API. Compatibility target — not a project participant. |
-| **rs1729** | Author of the upstream decoder reference implementation. Compatibility target via algorithm reuse. |
+| **Andreas Spiess (HB9BLA)** | Author of the BalloonHunter companion app. Stratos's primary BLE consumer. |
+| **rs1729** | Author of the upstream decoder reference implementation (`rs1729/RS`, GPL-2.0). Compatibility target via algorithm reuse. |
 
 ### 1.4 Goals & Non-Goals
 
 **Goals (v1):**
 - Receive and decode a single RS41 radiosonde on a user-configured 433 MHz frequency.
-- Expose decoded telemetry to the MySondy Go Android app over BLE without modifications to the app.
+- Expose decoded telemetry to the BalloonHunter app over BLE. Stratos's BLE payload format is wire-compatible with the MySondyGo API v3.0 ASCII protocol so other MySondyGo-aware clients also work without modification.
 - Allow frequency and sonde type to be configured via a built-in web page served on the device's own WiFi access point. **No home WiFi network is involved.**
 - Persist configuration across power cycles and survive corruption gracefully.
 - Run reliably on USB power for at least 24 h without manual intervention.
@@ -44,8 +46,8 @@ Existing open-source ESP32 radiosonde receivers (e.g. `dl9rdz/rdz_ttgo_sonde`) b
 - Battery-life optimisation, deep-sleep modes.
 - Outbound uploaders (SondeHub, APRS-IS, MQTT).
 - TFT display variants — SSD1306 OLED only.
-- A new mobile app — the existing MySondy Go app is the visualisation surface.
-- USB-CDC serial transport for the MySondy Go API (BLE only in v1).
+- A new mobile app — BalloonHunter is the visualisation surface.
+- USB-CDC serial transport for the Stratos protocol (BLE only in v1).
 - **WiFi STA / home network connectivity** — the device is AP-only. It never joins a foreign WiFi network and stores no WiFi credentials.
 - **Receiver-initiated OTA** (no `esp_https_ota`, no embedded CA bundle, no GitHub fetch from device). All OTA goes through the operator's phone browser.
 
@@ -73,12 +75,12 @@ Existing open-source ESP32 radiosonde receivers (e.g. `dl9rdz/rdz_ttgo_sonde`) b
                     │            ┌────────────┼────────────┐       │
                     │            ▼            ▼            ▼       │
                     │   ┌───────────────┐ ┌─────────┐ ┌───────┐    │
-                    │   │ MySondyGo BLE │ │ HTTP UI │ │ OLED  │    │
+                    │   │ Stratos BLE │ │ HTTP UI │ │ OLED  │    │
                     │   │ codec (NUS)   │ │ (httpd) │ │ (I²C) │    │
                     │   └───────┬───────┘ └────┬────┘ └───────┘    │
                     └───────────┼──────────────┼────────────────────┘
                                 ▼              ▼
-                         [Phone — MySondy   [Browser
+                         [Phone — Balloon-   [Browser
                           Go Android app]    config UI]
 ```
 
@@ -96,7 +98,7 @@ The firmware is decomposed into the following logical subsystems:
 | **Decoder Manager** | Selects the active decoder (RS41 in v1) based on configured `sonde_type`. Provides architectural hooks for M10, M20, DFM, PILOT to be added later. |
 | **RS41 Decoder** | Ported from `rs1729/RS`. Consumes byte stream, performs Reed-Solomon, extracts GPS, baromertic, and identifying fields. Outputs `sonde_frame_t` events. |
 | **Sonde State Manager** | Maintains the current state (`NO_SIGNAL` / `TRACKING` / `NAME_ONLY`) and the most recent decoded frame. Drives status broadcasts. |
-| **MySondy Go Codec** | Serialises state into `0/.../o`, `1/.../o`, `2/.../o`, `3/.../o` ASCII frames per API v3.0. Parses inbound `o{...}o` commands. |
+| **Stratos Codec (MySondyGo v3.0 wire-compatible)** | Serialises state into `0/.../o`, `1/.../o`, `2/.../o`, `3/.../o` ASCII frames per API v3.0. Parses inbound `o{...}o` commands. |
 | **BLE Server** | Exposes the Nordic UART Service (NUS). Routes inbound writes to the codec and outbound notifications from the codec. |
 | **HTTP Server** | Serves the embedded HTML config page and JSON API endpoints. Backed by `esp_http_server`. |
 | **WiFi Manager** | Brings up an open WiFi access point at boot. AP only — never joins a foreign network. |
@@ -145,7 +147,7 @@ components/
 ├── decoder_stub_m20/  Empty hook
 ├── decoder_stub_dfm/  Empty hook
 ├── sonde_state/       State machine, last-frame cache, event publication
-├── mysondygo_codec/   ASCII codec for API v3.0 (in/out)
+├── stratos_codec/   ASCII codec for API v3.0 (in/out)
 ├── ble_nus/           NimBLE server exposing Nordic UART Service
 ├── http_ui/           esp_http_server: GET /, /api/state, /api/config, POST /api/config, POST /api/ota
 ├── wifi_manager/      AP-only WiFi + captive-portal redirect
@@ -165,7 +167,7 @@ main/
 | `rf_isr_drain` | 4 KB | 18 | event-driven | Drain SX1276 FIFO on DIO0 interrupt; push to `byte_queue`. |
 | `decoder_rs41` | 8 KB | 10 | streaming | Consume `byte_queue`, run decoder, publish `sonde_frame_t` to event loop. |
 | `state_manager` | 4 KB | 8 | event-driven | Update state machine on each frame or 1-Hz tick. |
-| `ble_emit` | 4 KB | 7 | 1 Hz | Serialise current state to MySondyGo frame, notify NUS TX. |
+| `ble_emit` | 4 KB | 7 | 1 Hz | Serialise current state to Stratos protocol frame, notify NUS TX. |
 | `http_server` | 8 KB | 5 | request-driven | `esp_http_server` worker. |
 | `wifi_manager` | 4 KB | 6 | event-driven | Maintain AP, log client connect/disconnect events. |
 | `oled_ui` | 4 KB | 4 | 4 Hz | Refresh OLED. |
@@ -177,7 +179,7 @@ All inter-task communication uses FreeRTOS queues and the ESP-IDF event loop (`e
 **Boot sequence:**
 
 1. `app_main` initialises NVS, reads config (defaults if empty/corrupt).
-2. WiFi manager starts an open AP `MySondyGo-XXXX` on `192.168.4.1`.
+2. WiFi manager starts an open AP `Stratos-XXXX` on `192.168.4.1`.
 3. HTTP server starts on the AP interface.
 4. BLE stack initialises (NimBLE host + NUS service); advertising begins if `ble_on==true`.
 5. SX1276 driver initialises, configures FSK RX, sync word for active sonde type, frequency, RX BW.
@@ -257,7 +259,7 @@ Total cold boot to "device usable" target: ≤ 5 s.
 
 **Dependencies:** Phase 2.
 
-### 3.4 Phase 4 — MySondy Go BLE protocol
+### 3.4 Phase 4 — Stratos BLE protocol
 
 **Scope:**
 - NimBLE NUS service with confirmed UUIDs (see §5 risk on UUID confirmation).
@@ -270,12 +272,12 @@ Total cold boot to "device usable" target: ≤ 5 s.
 - Live panel in HTML UI mirrors the decoded state in real time.
 
 **Deliverables:**
-- MySondy Go Android app connects to the device, displays decoded sonde data without modification.
+- BalloonHunter app connects to the device, displays decoded sonde data without modification.
 - Frequency and sonde-type changes from the app take effect on the device.
 
 **Exit criteria:**
 - TC-BLE-100, TC-BLE-101, TC-BLE-103 pass.
-- Round-trip test on Android 11+ with the official MySondy Go app: frame parsing, command dispatch, reconnection after BLE disconnect.
+- Round-trip test on Android 11+ with the official BalloonHunter app: frame parsing, command dispatch, reconnection after BLE disconnect.
 - Web UI live panel updates within 2 s of a decoded frame.
 
 **Dependencies:** Phase 3.
@@ -311,7 +313,7 @@ Total cold boot to "device usable" target: ≤ 5 s.
 
 - **FR-1.1** [Must]: The device shall configure the SX1276 in continuous FSK RX mode at the user-configured frequency.
 - **FR-1.2** [Must]: The device shall apply a per-sonde-type RF profile (bitrate, frequency deviation, RX bandwidth, sync word) when the active sonde type changes.
-- **FR-1.3** [Must]: The device shall support frequencies in the range 137.200 MHz to 524.800 MHz (the MySondy Go API range), and shall reject out-of-range values.
+- **FR-1.3** [Must]: The device shall support frequencies in the range 137.200 MHz to 524.800 MHz (the MySondyGo API range), and shall reject out-of-range values.
 - **FR-1.4** [Should]: The device shall report RX RSSI in dBm with each decoded frame.
 - **FR-1.5** [Must]: The device shall never command the SX1276 into a transmit state under any operational path.
 
@@ -331,16 +333,16 @@ Total cold boot to "device usable" target: ≤ 5 s.
 - **FR-3.3** [Must]: The device shall transition to `TRACKING` upon receipt of a valid frame containing a GPS fix.
 - **FR-3.4** [Should]: The device shall transition to `NAME_ONLY` upon receipt of a valid frame lacking a GPS fix.
 
-#### Group 4 — MySondy Go BLE output
+#### Group 4 — Stratos BLE output (MySondyGo API v3.0 wire-compatible)
 
-- **FR-4.1** [Must]: The device shall emit BLE notifications encoded per MySondy Go API v3.0 §OUTPUT.
+- **FR-4.1** [Must]: The device shall emit BLE notifications encoded per MySondyGo API v3.0 §OUTPUT.
 - **FR-4.2** [Must]: When in `NO_SIGNAL`, the device shall emit `0/TYPE/FREQ/SIGN/BAT%/BATV/BUZMUTE/VER/o` at ≥ 0.5 Hz (heartbeat).
 - **FR-4.3** [Must]: When in `TRACKING`, the device shall emit `1/TYPE/FREQ/NAME/LAT/LON/ALT/HVEL/VVEL/SIGN/BAT%/AFC/BK/BKTIME/BATV/BUZMUTE/RES/RES/RES/VER/o` for each decoded frame (typically ~1 Hz).
 - **FR-4.4** [Should]: When in `NAME_ONLY`, the device shall emit `2/TYPE/FREQ/NAME/SIGN/BAT%/AFC/BATV/BUZMUTE/VER/o` per decoded frame.
 - **FR-4.5** [Must]: The device shall emit a `3/...` settings frame in response to `o{?}o`.
 - **FR-4.6** [Must]: The `BUZMUTE` field shall always be reported as `-1` (not installed) in v1, since no buzzer is connected.
 
-#### Group 5 — MySondy Go BLE input
+#### Group 5 — Stratos BLE input (MySondyGo API v3.0 wire-compatible)
 
 - **FR-5.1** [Must]: The device shall parse inbound writes wrapped in `o{...}o` and silently ignore writes lacking those delimiters.
 - **FR-5.2** [Must]: The device shall accept the command `f=<MHz>` and update the active frequency, persisting to NVS.
@@ -349,7 +351,7 @@ Total cold boot to "device usable" target: ≤ 5 s.
 - **FR-5.5** [Must]: The device shall accept `re` (reboot) and `Re` (reset to defaults + reboot).
 - **FR-5.6** [Should]: The device shall accept `mute=<0|1>` and store the value (no audible effect since no buzzer in v1).
 - **FR-5.7** [Should]: The device shall accept `myCall=<text>` (max 8 chars), `aprsName=<0|1>`, `freqofs=<Hz>`.
-- **FR-5.8** [Should]: The device shall accept `rs41.rxbw=<idx>` etc. and apply the corresponding RX bandwidth from MySondy Go API Appendix 2 to the active radio profile.
+- **FR-5.8** [Should]: The device shall accept `rs41.rxbw=<idx>` etc. and apply the corresponding RX bandwidth from MySondyGo API Appendix 2 to the active radio profile.
 - **FR-5.9** [May]: The device shall accept all pin-config and serial-config commands (`oled_sda`, `oled_scl`, `oled_rst`, `led_pout`, `buz_pin`, `battery`, `lcd`, `lcdOn`, `com`, `baud`) and acknowledge them by emitting an updated `3/...` frame, but shall not change runtime hardware behaviour.
 - **FR-5.11** [Should]: The device shall honour `vBatMin=<mV>`, `vBatMax=<mV>`, `vBatType=<0|1|2>` commands by persisting them to NVS and using them for the next battery percentage calculation. These are real configuration, not pin-config.
 - **FR-5.10** [May]: The device shall accept `sleep=<n>` and respond by logging the command; no deep-sleep transition occurs in v1 (see §5).
@@ -364,7 +366,7 @@ Total cold boot to "device usable" target: ≤ 5 s.
   - `0` Linear: `pct = clamp((Vbatt − vBatMin) / (vBatMax − vBatMin), 0, 1) × 100`
   - `1` Sigmoidal (default): smoother S-curve approximating Li-Ion discharge.
   - `2` Anti-sigmoidal: inverse curvature (steep at extremes).
-- **FR-5b.6** [Should]: Default values shall be `vBatMin = 2950 mV`, `vBatMax = 4200 mV`, `vBatType = 1` (sigmoidal). Note that `vBatMax = 4200` deviates from MySondy Go API's default of `4180`; this matches typical 18650 fresh-off-the-charger voltage.
+- **FR-5b.6** [Should]: Default values shall be `vBatMin = 2950 mV`, `vBatMax = 4200 mV`, `vBatType = 1` (sigmoidal). Note that `vBatMax = 4200` deviates from MySondyGo API's default of `4180`; this matches typical 18650 fresh-off-the-charger voltage.
 
 #### Group 6 — Web UI / HTTP API
 
@@ -380,9 +382,9 @@ Total cold boot to "device usable" target: ≤ 5 s.
 
 #### Group 7 — WiFi (AP-only)
 
-- **FR-7.1** [Must]: The device shall start a WiFi access point at boot named `MySondyGo-XXXX` (last 4 hex of the WiFi MAC) on 802.11 b/g/n channel 6 by default.
+- **FR-7.1** [Must]: The device shall start a WiFi access point at boot named `Stratos-XXXX` (last 4 hex of the WiFi MAC) on 802.11 b/g/n channel 6 by default.
 - **FR-7.2** [Must]: The AP shall be reachable at IP `192.168.4.1` and assign clients via DHCP from the `192.168.4.0/24` range.
-- **FR-7.3** [Must]: The AP shall be **open** (no password) in v1, matching the MySondy Go device behaviour for ease of field operation.
+- **FR-7.3** [Must]: The AP shall be **open** (no password) in v1, matching the compatible device behaviour for ease of field operation.
 - **FR-7.4** [Must]: The device shall **never** join a foreign WiFi network as STA. No SSID/PSK are stored or accepted.
 - **FR-7.5** [Should]: A captive-portal redirect (DNS hijack + 302) shall direct any HTTP request on the AP to `http://192.168.4.1/` so phones automatically open the configuration page on connect.
 
@@ -412,7 +414,7 @@ The receiver never makes outbound HTTPS requests. All OTA goes through the opera
 
 - **FR-11.1** [Must]: The device shall expose `POST /api/ota/upload` accepting a multipart upload of a single `firmware.bin` file. The receiver shall stream the body directly into the inactive OTA partition without buffering the entire image in RAM.
 - **FR-11.2** [Must]: The web UI shall provide an "Update firmware" panel that:
-  1. Queries GitHub's Releases API (`https://api.github.com/repos/SensorsIot/Balloon-Receiver/releases/latest`) **from the browser** to discover the latest release tag and asset URL.
+  1. Queries GitHub's Releases API (`https://api.github.com/repos/SensorsIot/Stratos/releases/latest`) **from the browser** to discover the latest release tag and asset URL.
   2. Downloads the `.bin` asset from `*.githubusercontent.com` **in the browser**.
   3. POSTs the downloaded bytes to `/api/ota/upload`.
   4. Displays progress for both download and upload phases.
@@ -439,8 +441,8 @@ The receiver never makes outbound HTTPS requests. All OTA goes through the opera
 
 - **FR-14.1** [Must]: All hardware pin assignments (radio SPI, OLED I²C, LED, button, battery sense) shall be derived from a compile-time **board profile** identified at runtime by `board_id` in NVS. There shall be no individual-pin configuration via UI, BLE, or API.
 - **FR-14.2** [Must]: v1 shall ship a single board profile: `board_id = 0` → **LILYGO TTGO LoRa32 V2.1_1.6**. The architecture shall permit additional profiles to be added by appending entries to the profile table without modifying any other component.
-- **FR-14.3** [Should]: The active board profile's pin assignments shall populate the `OLED-SDA`, `OLED-SCL`, `OLED-RST`, `LED-PIN`, `BAT-PIN`, `BUZ-PIN` fields in the BLE settings reply (frame `3`) — so the MySondy Go app sees consistent values for the actual hardware in use.
-- **FR-14.4** [Must]: BLE pin-config commands (`oled_sda`, `oled_scl`, `oled_rst`, `led_pout`, `buz_pin`, `battery`) are accepted (per FR-5.9) but discarded — they shall not change the runtime pin map. This preserves protocol compatibility with the MySondy Go app while enforcing the board-profile model.
+- **FR-14.3** [Should]: The active board profile's pin assignments shall populate the `OLED-SDA`, `OLED-SCL`, `OLED-RST`, `LED-PIN`, `BAT-PIN`, `BUZ-PIN` fields in the BLE settings reply (frame `3`) — so the BalloonHunter app sees consistent values for the actual hardware in use.
+- **FR-14.4** [Must]: BLE pin-config commands (`oled_sda`, `oled_scl`, `oled_rst`, `led_pout`, `buz_pin`, `battery`) are accepted (per FR-5.9) but discarded — they shall not change the runtime pin map. This preserves protocol compatibility with the BalloonHunter app while enforcing the board-profile model.
 - **FR-14.5** [May]: A future build may surface the board-profile dropdown for early prototyping/bring-up; in v1 the dropdown shows only `TTGO LoRa32 V2.1_1.6` (selected, locked).
 
 ### 4.2 Non-Functional Requirements (NFR)
@@ -450,7 +452,7 @@ The receiver never makes outbound HTTPS requests. All OTA goes through the opera
 - **NFR-1.3** [Should]: RS41 lock-acquisition time at strong signal (≥ −80 dBm) from cold start: ≤ 30 s.
 - **NFR-2.1** [Must]: The device shall run continuously for ≥ 24 h with concurrent BLE + WiFi + active decoding without reboot or memory leak (free heap drift ≤ 5 %).
 - **NFR-2.2** [Must]: On any task crash, the device shall reboot and resume normal operation within 60 s.
-- **NFR-3.1** [Must]: The device shall be compatible with the official MySondy Go Android app (latest Play Store version) on Android 11 or newer, without app modifications.
+- **NFR-3.1** [Must]: The device shall be compatible with the official BalloonHunter app (latest Play Store version) on Android 11 or newer, without app modifications.
 - **NFR-4.1** [Must]: WiFi credentials shall be stored in NVS with the encryption-at-rest provided by ESP-IDF NVS encryption (when enabled).
 - **NFR-4.2** [Must]: OTA images shall be integrity-verified (image header validation; SHA-256 of the bin if signed).
 - **NFR-4.3** [Should]: HTTP server shall reject inputs > 4 KB on the config endpoint to prevent DoS via oversized POST.
@@ -476,7 +478,7 @@ The receiver never makes outbound HTTPS requests. All OTA goes through the opera
 
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
-| **R-1** MySondy Go BLE service UUIDs unknown — the API PDF specifies the application protocol but not GATT UUIDs. | High | High | Confirm via nRF Connect against real MySondy Go firmware before Phase 4. Backup plan: contact author Mirko Dalmonte (`iz4pnn@gmail.com`). Worst case: choose Nordic UART Service (NUS) UUIDs and document a small Android-app patch. |
+| **R-1** Stratos defines its own GATT UUIDs (the MySondyGo API PDF specifies the application protocol but not the GATT layer). | Med | Med | Stratos exposes the standard Nordic UART Service (NUS) UUIDs (`6E400001-…`) on which the ASCII protocol rides. BalloonHunter targets these UUIDs. Other MySondyGo-aware clients that hard-code different service UUIDs may need a one-line patch. |
 | **R-2** SX1276 FSK config quirks — sync-word matching, deviation, and RX BW interactions are not always documented; bench-tuning may be required per sonde type. | Medium | Medium | Allocate 2 days of bench time in Phase 2 with a known RS41 capture; document the working register values per sonde type as a baseline. |
 | **R-3** rs1729 decoder port complexity — the C is research-grade, with `stdin`/`stdout` assumptions and ad-hoc globals. | Medium | Medium | Treat the port as a one-time fork: encapsulate inside `decoder_rs41`, do not try to re-merge upstream. Track upstream changes manually. |
 | **R-4** BLE + WiFi coexistence on shared 2.4 GHz radio. | Low | Medium | Standard ESP32 dual-mode is well supported; allocate one dedicated soak test in Phase 5 (NFR-2.1). |
@@ -487,9 +489,9 @@ The receiver never makes outbound HTTPS requests. All OTA goes through the opera
 
 ### 5.2 Assumptions
 
-- (assumed) **AP fallback SSID format**: `MySondyGo-XXXX` where `XXXX` is the last 4 hex digits of the WiFi MAC. AP is **open** (no password) for ease of first-boot setup, matching captive-portal best practice for hobbyist devices.
-- (assumed) **Default frequency**: 404.000 MHz (per MySondy Go API default) — common-launch frequency in central Europe; user adjusts for their region.
-- (assumed) **`rs41.rxbw` and other `*.rxbw` commands take effect**: these are RF parameters (not pin config), so they are honoured rather than ignored. Default values match MySondy Go API Appendix 2 defaults.
+- (assumed) **AP fallback SSID format**: `Stratos-XXXX` where `XXXX` is the last 4 hex digits of the WiFi MAC. AP is **open** (no password) for ease of first-boot setup, matching captive-portal best practice for hobbyist devices.
+- (assumed) **Default frequency**: 404.000 MHz (per MySondyGo API default) — common-launch frequency in central Europe; user adjusts for their region.
+- (assumed) **`rs41.rxbw` and other `*.rxbw` commands take effect**: these are RF parameters (not pin config), so they are honoured rather than ignored. Default values match MySondyGo API Appendix 2 defaults.
 - (assumed) **`sleep` command is a no-op in v1** (logged for debug); deep-sleep is out of scope. May be implemented in v1.1 if battery use becomes a goal.
 - (assumed) **BLE pairing**: "Just Works" (no static passkey, no MITM protection). Acceptable because the device stores no secrets — there are no WiFi credentials, no API tokens, no user data.
 - (assumed) **`PILOT` (tipo=4)** is accepted and stored, but no decoder runs in v1 — state remains `NO_SIGNAL`. The user may select PILOT and the device will not crash, simply not produce frames `1` or `2`.
@@ -504,7 +506,7 @@ The receiver never makes outbound HTTPS requests. All OTA goes through the opera
 - NimBLE host stack (`esp-nimble-cpp` or vanilla `esp_nimble` — vanilla preferred).
 - `esp_http_server`, `esp_wifi` (SoftAP only), `nvs_flash`, `esp_ota_ops` — all part of ESP-IDF.
 - `rs1729/RS` — GPL-2.0 reference decoder source (vendored, not submodule, at a pinned commit).
-- MySondy Go Android app (closed source, Play Store) — not modified, used as conformance peer.
+- BalloonHunter app (closed source, Play Store) — not modified, used as conformance peer.
 
 ### 5.4 Environmental Constraints
 
@@ -526,17 +528,17 @@ The receiver never makes outbound HTTPS requests. All OTA goes through the opera
 
 | Attribute | Value |
 |---|---|
-| Service UUID | `6E400001-B5A3-F393-E0A9-E50E24DCCA9E` (TBC against MySondy Go firmware — see R-1) |
+| Service UUID | `6E400001-B5A3-F393-E0A9-E50E24DCCA9E` (TBC against reference firmware — see R-1) |
 | RX Characteristic | `6E400002-B5A3-F393-E0A9-E50E24DCCA9E` — Write, Write-Without-Response |
 | TX Characteristic | `6E400003-B5A3-F393-E0A9-E50E24DCCA9E` — Notify |
-| Advertising name | `MySondyGo-XXXX` (last 4 hex of BLE MAC) |
+| Advertising name | `Stratos-XXXX` (last 4 hex of BLE MAC) |
 | Connection parameters | Default ESP32 NimBLE (interval 7.5–48 ms, timeout 4 s) |
 | MTU | Negotiated — minimum 23 bytes per BLE 4.0; longer frames split per BLE-023 |
 | Pairing | None ("Just Works") |
 
-#### 6.1.2 MySondy Go ASCII Protocol (over NUS)
+#### 6.1.2 Stratos ASCII Protocol over NUS (MySondyGo v3.0 wire-compatible)
 
-The protocol on top of the NUS byte stream conforms to MySondy Go API v3.0. Output frames described in §4.1 Group 4. Input commands described in §4.1 Group 5. Frame examples in §10 Appendix B.
+The protocol on top of the NUS byte stream conforms to MySondyGo API v3.0. Output frames described in §4.1 Group 4. Input commands described in §4.1 Group 5. Frame examples in §10 Appendix B.
 
 #### 6.1.3 HTTP — Configuration UI and JSON API
 
@@ -549,13 +551,13 @@ The protocol on top of the NUS byte stream conforms to MySondy Go API v3.0. Outp
 | `/api/factory-reset` | POST | Trigger factory reset + reboot | empty body; 202 Accepted then reboot |
 | `/api/ota/upload` | POST | Browser-uploaded OTA (multipart `firmware.bin`) | 202 Accepted; receiver streams body to OTA partition. |
 | `/api/ota/progress` | GET | OTA progress stream (Server-Sent Events) | text/event-stream; events `start`, `progress {pct}`, `complete`, `error {msg}`. |
-| `/api/version` | GET | Firmware build info | `{"version": "1.0.0+abcdef1", "idf": "5.x", "github_repo": "SensorsIot/Balloon-Receiver"}` |
+| `/api/version` | GET | Firmware build info | `{"version": "1.0.0+abcdef1", "idf": "5.x", "github_repo": "SensorsIot/Stratos"}` |
 
 All JSON responses use `Content-Type: application/json; charset=utf-8`. CORS not enabled (local-network use).
 
 #### 6.1.4 Serial console (UART0 / USB-CDC)
 
-UART0 at 115200 8N1, used exclusively for `ESP_LOG` output and ESP-IDF monitor. **Not** a MySondy Go API transport in v1 (BLE-only).
+UART0 at 115200 8N1, used exclusively for `ESP_LOG` output and ESP-IDF monitor. **Not** a Stratos protocol transport in v1 (BLE-only).
 
 #### 6.1.5 OLED display (SSD1306)
 
@@ -668,7 +670,7 @@ typedef struct {
 
 RS41 baseline: bitrate 4800, deviation 4800, sync 8 bytes (per RS41 frame format), rxbw_idx 4 (6.3 kHz).
 
-### 6.4 Commands / Opcodes (MySondy Go ASCII subset)
+### 6.4 Commands / Opcodes (Stratos ASCII protocol subset (MySondyGo v3.0 wire-compatible))
 
 See §10 Appendix B for the complete command/frame table. Honoured commands and accept-and-ignore commands are listed in FR-5.x. Unrecognised commands inside a valid `o{...}o` envelope are logged and ignored without error.
 
@@ -681,12 +683,12 @@ See §10 Appendix B for the complete command/frame table. Honoured commands and 
 1. Connect TTGO LoRa32 v2.1 via USB-C.
 2. From the project root: `idf.py -p /dev/ttyUSB0 flash monitor`.
 3. Hold `BOOT` (GPIO0) and tap `EN` (RESET) if the board does not auto-enter download mode (CP210x with autoreset usually does).
-4. First-boot output: NVS empty → defaults applied → AP `MySondyGo-XXXX` starts.
+4. First-boot output: NVS empty → defaults applied → AP `Stratos-XXXX` starts.
 
 ### 7.2 First-time setup
 
 1. Power the device.
-2. On a phone, join the open WiFi network `MySondyGo-XXXX`.
+2. On a phone, join the open WiFi network `Stratos-XXXX`.
 3. Browser opens the configuration page automatically (captive-portal redirect); if not, navigate to `http://192.168.4.1`.
 4. Pick frequency and sonde type, set MYCALL, optionally calibrate the battery, click Save.
 5. Done — there is no "join home WiFi" step. The device stays on its own AP forever.
@@ -694,8 +696,8 @@ See §10 Appendix B for the complete command/frame table. Honoured commands and 
 ### 7.3 Field operation (normal)
 
 1. Power the device (USB or battery).
-2. Open the MySondy Go Android app on the phone.
-3. Scan and connect to `MySondyGo-XXXX` over Bluetooth.
+2. Open the BalloonHunter app on the phone.
+3. Scan and connect to `Stratos-XXXX` over Bluetooth.
 4. App shows live decoded data. Frequency and sonde-type changes from the app are honoured.
 5. OLED mirrors the same data (when on; toggle with short press).
 6. To change settings without the app, the phone can also join the device's WiFi AP and use the web page in parallel.
@@ -705,8 +707,8 @@ See §10 Appendix B for the complete command/frame table. Honoured commands and 
 | Path | Where | Effect |
 |---|---|---|
 | Web UI form | Browser → `POST /api/config` | Persisted to NVS, applied immediately (some fields may require radio re-tune, no reboot). |
-| BLE `o{f=…}o` | MySondy Go app | Persisted, applied immediately. |
-| BLE `o{Re}o` | MySondy Go app | Factory reset + reboot. |
+| BLE `o{f=…}o` | BalloonHunter app | Persisted, applied immediately. |
+| BLE `o{Re}o` | BalloonHunter app | Factory reset + reboot. |
 | Long-press button | Hardware | Factory reset + reboot. |
 
 ### 7.5 OTA firmware update
@@ -714,10 +716,10 @@ See §10 Appendix B for the complete command/frame table. Honoured commands and 
 The receiver has no internet — the phone does the GitHub fetch.
 
 1. On the phone, ensure cellular data is on.
-2. Connect the phone to the receiver's AP `MySondyGo-XXXX`.
+2. Connect the phone to the receiver's AP `Stratos-XXXX`.
 3. Open `http://192.168.4.1` in the phone's browser.
 4. Click "Update from GitHub". The browser:
-   - Queries `https://api.github.com/repos/SensorsIot/Balloon-Receiver/releases/latest` over cellular.
+   - Queries `https://api.github.com/repos/SensorsIot/Stratos/releases/latest` over cellular.
    - Downloads the `.bin` from the asset URL over cellular.
    - Uploads it to the receiver via the AP.
 5. The receiver writes to the inactive OTA slot, verifies the image header, and reboots. If the new image fails to boot, A/B rollback automatically restores the previous image.
@@ -766,7 +768,7 @@ For sideloading without internet, the same UI offers a "Upload local file" file-
 | TC-DEC-102 | Decoder soak | Run 1 h with continuous signal. | No crash, no leak (ΔHeap ≤ 5 %), all frames decoded. |
 | TC-DEC-103 | RS dispatch | Switch `tipo=2` (M20) — no decoder. | State transitions to NO_SIGNAL within 30 s; no crash. |
 
-### 8.3 Phase 4 Verification — BLE / MySondy Go protocol
+### 8.3 Phase 4 Verification — BLE / Stratos protocol
 
 | Test ID | Feature | Procedure | Success Criteria |
 |---|---|---|---|
@@ -796,7 +798,7 @@ For sideloading without internet, the same UI offers a "Upload local file" file-
 | TC-BAT-104 | Web UI calibration round-trip | Open UI, set vBatMax=4180, save, reload. | Persisted; new value reflected in frame `3`. |
 | EC-BLE-201 | Connect/disconnect churn | Connect/disconnect 20× rapidly. | No crash, heap stable, advertising resumes. |
 | EC-BLE-203 | BLE+WiFi coexistence | OTA over WiFi while BLE connected. | BLE stays connected or recovers; OTA succeeds. |
-| TC-MSG-200 | MySondy Go app round-trip | Connect via the official app. | App shows live data; commands round-trip. |
+| TC-MSG-200 | BalloonHunter app round-trip | Connect via the official app. | App shows live data; commands round-trip. |
 
 ### 8.4 Acceptance Tests
 
@@ -926,8 +928,8 @@ No open gaps in v1.
 | Device boots but no AP visible | WiFi init failed or NVS corrupt | Check serial log for "NVS init" or "esp_wifi_start" errors | Power-cycle. If persists, long-press button → factory reset. |
 | AP visible but portal does not load | Browser caching old captive portal | Open `http://192.168.4.1` directly | Clear browser cache; use private window. |
 | WiFi joins but `/api/state` 404 | HTTP server task crash | Serial log for httpd errors | Reboot. If recurring, check heap via `/api/version` (extended diagnostic). |
-| MySondy Go app cannot find device | BLE off or wrong UUID | Enable BLE in `/api/config`; verify UUIDs in nRF Connect | Toggle BLE on; if UUIDs differ from app expectation, see R-1. |
-| MySondy Go app connects but shows stale data | NUS notify not enabled by app | nRF Connect: subscribe to TX char | Confirm subscription happened; reconnect if needed. |
+| BalloonHunter app cannot find device | BLE off or wrong UUID | Enable BLE in `/api/config`; verify UUIDs in nRF Connect | Toggle BLE on; if UUIDs differ from app expectation, see R-1. |
+| BalloonHunter app connects but shows stale data | NUS notify not enabled by app | nRF Connect: subscribe to TX char | Confirm subscription happened; reconnect if needed. |
 | No sonde decoded despite signal | Wrong sonde type or wrong frequency | Check OLED + `/api/state.type` and `freq_khz` | Adjust via app or web UI. |
 | RSSI strong but no decode | RX BW or sync word mismatch | Send `o{rs41.rxbw=4}o` to confirm default | Adjust per MySondy Appendix 2. |
 | Web UI live panel frozen | WebSocket / polling broken | Browser dev console for failed `/api/state` requests | Reload; if persistent, reboot. |
@@ -943,7 +945,7 @@ No open gaps in v1.
 
 | Constant | Value |
 |---|---|
-| AP fallback SSID prefix | `MySondyGo-` |
+| AP fallback SSID prefix | `Stratos-` |
 | AP IP | `192.168.4.1` |
 | AP startup timeout | 5 s |
 | Default frequency | 404.000 MHz |
@@ -956,7 +958,7 @@ No open gaps in v1.
 | Lock-loss timeout | 30 s |
 | HTML+JS payload budget | ≤ 32 KB minified |
 
-### B. MySondy Go API v3.0 frame reference (subset implemented)
+### B. MySondyGo API v3.0 frame reference (subset implemented)
 
 **Output (device → app):**
 
@@ -967,7 +969,7 @@ No open gaps in v1.
 | `2` (name only) | `2/TYPE/FREQ/NAME/SIGN/BAT%/AFC/BATV/BUZMUTE/VER/o` |
 | `3` (settings reply, BLE form) | `3/TYPE/FREQ/OLED-SDA/OLED-SCL/OLED-RST/LED-PIN/RS41-BAND/M20-BAND/M10-BAND/PILOT-BAND/DFM-BAND/MYCALL/FREQ-OFS/BAT-PIN/BAT-MIN/BAT-MAX/BAT-TYPE/LCD-TYPE/NAME-TYPE/BUZ-PIN/VER/o` |
 
-Field semantics: see MySondy Go API v3.0 PDF (URL in §11). `BUZMUTE=-1` always (no buzzer in v1).
+Field semantics: see MySondyGo API v3.0 PDF (URL in §11). `BUZMUTE=-1` always (no buzzer in v1).
 
 **Input (app → device, all wrapped in `o{...}o`, slash-separated):**
 
@@ -995,7 +997,7 @@ See §6.3.3.
 
 ```
 ┌────────────────────────────────────────┐
-│ MySondyGo  RS41   404.600 MHz   📶 🔵│  Top bar: project, type, freq, WiFi/BLE
+│ Stratos    RS41   404.600 MHz   📶 🔵│  Top bar: project, type, freq, WiFi/BLE
 ├────────────────────────────────────────┤
 │ NAME   S1234567                        │
 │ LAT    47.12345°    LON   8.54321°     │
@@ -1028,7 +1030,7 @@ When `NO_SIGNAL`: replace decode rows with `── searching ──` plus rotati
 
 ### F. Reference URLs
 
-- MySondy Go API v3.0 (2025-04-02): https://download.farenight.it/MySondyGoAPI_V3.pdf
+- MySondyGo API v3.0 (2025-04-02): https://download.farenight.it/MySondyGoAPI_V3.pdf
 - rs1729 decoder source: https://github.com/rs1729/RS (GPL-2.0)
 - Cross-reference (do not import): https://github.com/dl9rdz/rdz_ttgo_sonde
 - TTGO LoRa32 v2.1 (LilyGO): https://lilygo.cc/products/lora3 (vendor product page; schematic available separately)
@@ -1044,13 +1046,13 @@ This FSD activates the following standard ESP-IDF test specs from the FSD-writer
 - Watchdog — WDT-001..022, TC-WDT-100..102, EC-WDT-200..203
 - Logging — LOG-001..026, TC-LOG-100..103, EC-LOG-200..204
 
-Project-specific overrides: AP SSID format `MySondyGo-XXXX`, watchdog 60 s, heap 32 KB warning / 8 KB critical, BLE notification rate 1 Hz, lock-loss 30 s.
+Project-specific overrides: AP SSID format `Stratos-XXXX`, watchdog 60 s, heap 32 KB warning / 8 KB critical, BLE notification rate 1 Hz, lock-loss 30 s.
 
 ---
 
 ## 11. Related
 
-- [[Balloon-Receiver Test Plan]] — detailed V&V procedures and benches (TBD).
-- [[Balloon-Receiver BLE Cheatsheet]] — quick reference for the MySondy Go ASCII protocol (TBD).
-- [[kytrack-map-fsd]] — sibling project: Pi-side dxlAPRS-based gateway. Balloon-Receiver is a complementary portable receiver.
+- [[Stratos Test Plan]] — detailed V&V procedures and benches (TBD).
+- [[Stratos BLE Cheatsheet]] — quick reference for the Stratos ASCII protocol (TBD).
+- [[kytrack-map-fsd]] — sibling project: Pi-side dxlAPRS-based gateway. Stratos is a complementary portable receiver.
 - [[Claude_skill_fsd]] — meta-vault: skill specification driving FSD generation.

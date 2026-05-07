@@ -1,0 +1,4 @@
+#include "sonde_types.h"
+
+ESP_EVENT_DEFINE_BASE(SONDE_EVENT);
+ESP_EVENT_DEFINE_BASE(CFG_EVENT);
