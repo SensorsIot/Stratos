@@ -1101,7 +1101,116 @@ Project-specific overrides: AP SSID format `Stratos-XXXX`, watchdog 60 s, heap 3
 
 ---
 
-## 11. Related
+## 11. Roadmap (TODO): Multi-Sonde Support
+
+v1 of Stratos decodes the Vaisala RS41 only. The architecture is already
+type-agnostic — the `decoder_vtable_t` machinery, the `sonde_frame_t`
+shared schema, and per-type slots in `rf_profile_t` were designed for
+multi-format from day one — so adding a new sonde format is a pure
+per-format implementation effort, no core refactor.
+
+### 11.1 Architecture (already in place)
+
+```
+RF (rf_sx1276) ─[bytes, per RF profile]─► decoder_core ─► decoder_<type>
+                                              │                  │
+                                              └─ vtable: rs41 / m10 / m20 / dfm…  ▼
+                                                                        sonde_frame_t
+                                                                                │
+                                                       ┌───── sonde_state ◄─────┤
+                                                       │                        │
+                                                  OLED, BLE codec,   HTTP UI ◄──┘
+                                                  all type-agnostic
+```
+
+`decoder_core_set_active(type, byte_q)` stops the current decoder and
+starts the requested one. `on_cfg_change` already calls it on `tipo`
+config change. The radio profile gets re-applied via
+`st_rf_apply_profile(st_rf_profile_for(type))`.
+
+### 11.2 Sonde inventory & priority
+
+Ordered by European prevalence × implementation difficulty (easiest
+first, within similar prevalence):
+
+| # | Type | Where common | Modulation / rate | ECC | Effort |
+|---|---|---|---|---|---|
+| 1 | **M10** | France, Spain, eastern Europe | GFSK, 9600 bps, fdev ±2.4 kHz | XOR scramble + CRC, **no RS** | ~2–3 days |
+| 2 | **M20** | M10 successor (France, ongoing) | GFSK, 9600 bps | Different XOR mask, no RS | ~1 day after M10 |
+| 3 | **DFM-09 / DFM-17** | Germany (Graw) | GFSK 2500 bps, **Manchester-encoded** | Variable subframes, custom CRC | ~3–4 days |
+| 4 | **RS92** | Older Vaisala (rare now, historical) | GFSK 4800 bps | RS-style ECC — re-uses `rs_ecc.c` | ~3 days |
+| 5 | **PILOT (LMS6)** | Wind-finding, US weather service | 4800 bps | Different framing, no RS41-style ECC | ~3 days |
+| 6 | **iMet / MRZ / MEISEI** | Niche (US iMet, Russia, Japan) | various | various | defer to v2 |
+
+**v1.5 target**: items 1–3 (M10, M20, DFM). Covers ~95 % of European
+launches outside Vaisala territory. RS92, PILOT, and the niche formats
+defer past v1.5.
+
+### 11.3 Per-format work template
+
+For each format the work is the same shape:
+
+1. **RF profile validation** — confirm bitrate / fdev / RxBw / sync against
+   `rs1729/RS` and `dl9rdz/rdz_ttgo_sonde` references; bench-tune if
+   needed. Slot already exists in `rf_sx1276.c` `s_profiles[]`.
+2. **Component skeleton** — `components/decoder_<type>/` with
+   `decoder_<type>.c`, vtable export, `CMakeLists.txt`, `<type>_vtable()`
+   getter. Copy `decoder_rs41` as the template.
+3. **Frame parser**:
+   - PayloadLen (radio packet length per the format)
+   - De-whitening / de-scrambling (per-format scheme)
+   - Field offsets (serial, GPS, PTU)
+   - ECC if any (RS92 re-uses our `rs_ecc.c`)
+   - CRC validation
+4. **Wire it up**:
+   - `decoder_core_register(decoder_<type>_vtable())` in `app_main.c`
+   - `SONDE_TYPE_<X>` already in `sonde_types.h`
+5. **Test** — capture raw frames via `/api/raw`, validate fields in a
+   per-format Python harness alongside the existing rs41 one.
+
+### 11.4 Cross-cutting work (do once, applies to all)
+
+- **Decoder switching**: already works via `decoder_core_set_active`.
+- **Per-profile FIFO drain timing**: M10/M20 at 9600 bps fills the 64-byte
+  FIFO in ~53 ms. The 30 ms RS41 drain interval works but tighten to
+  15 ms or expose drain-timeout per RF profile.
+- **Manchester decoder helper**: software Manchester decode routine for
+  DFM. Small (~30 lines).
+- **Auto-detect mode** *(optional, v2)*: scan a frequency, try each
+  decoder for ~3 s, lock onto whichever produces a valid frame first.
+  ~1 day. Useful when a launch site uses mixed sonde types.
+- **Test harness extension**: per-format Python decoder alongside
+  `/tmp/rs41_decode.py`-style validators, so we can iterate without
+  flashing for each tweak.
+- **Per-format documentation**: extend FSD §6 with a subsection per
+  decoded type — frame layout, sync, RF profile, protocol references.
+
+### 11.5 Risks & unknowns
+
+| Risk | Mitigation |
+|---|---|
+| **No real M10/M20/DFM sonde locally for testing** | Capture raw I/Q with rtl-sdr during a launch (or fetch a recording from SondeHub) and replay through the SX1276 via attenuator + dummy-load coupling. Or coordinate with someone who has the sonde type. |
+| **DFM Manchester encoding** doubles the chip rate | Set SX1276 bitrate to twice the data rate; software Manchester-decode the FIFO bytes. Already a known pattern (rdz_ttgo_sonde does it). |
+| **Higher bit rates fill FIFO faster** | Tighten drain interval globally to 15 ms, or per-profile. |
+| **Per-format de-scrambling differs** | Each decoder component owns its own scrambling constants. No shared assumptions. |
+| **Frame-length ambiguity at runtime** in auto-detect mode | v1.5 ships without auto-detect — operator picks `sonde_type` explicitly. Auto-detect is v2. |
+
+### 11.6 Suggested sequence
+
+1. **Now → +3 days: M10.** Smallest format, simplest scrambling, no ECC.
+   Proves the "second decoder" plumbing end-to-end and exercises
+   runtime sonde-type switching.
+2. **+3 → +4 days: M20.** Mostly identical to M10. Reuse the harness.
+3. **+4 → +8 days: DFM-09 / DFM-17.** Most complex of the three; covers
+   Germany.
+4. **+8 days: review.** Decide whether to push for RS92 / PILOT, or
+   call v1.5 done and harden.
+
+Implementation tracks on a feature branch, separate from `main`.
+
+---
+
+## 12. Related
 
 - [[Stratos Test Plan]] — detailed V&V procedures and benches (TBD).
 - [[Stratos BLE Cheatsheet]] — quick reference for the Stratos ASCII protocol (TBD).
