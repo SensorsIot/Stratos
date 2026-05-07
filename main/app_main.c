@@ -3,7 +3,6 @@
  * See docs/fsd/Stratos FSD.md for the full specification.
  *
  * Copyright (C) 2026 SensorsIot. Licensed under GPL-2.0.
- * Includes derivative work of rs1729/RS (GPL-2.0).
  */
 
 #include <string.h>

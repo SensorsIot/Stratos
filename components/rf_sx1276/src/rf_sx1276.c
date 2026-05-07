@@ -29,8 +29,8 @@ static rf_profile_t        s_active_profile;
 static volatile uint32_t   s_byte_count;       /* total bytes drained from FIFO since boot */
 static volatile uint32_t   s_sync_count;       /* increments each time IrqFlags1 SyncAddressMatch is observed set */
 
-/* RS41 sync word baseline below is from the rs1729 reference. Phase 2 bench
-   tuning will confirm/refine — see FSD §6.3.4 and §5 R-2. */
+/* RS41 sync word value matches what the Vaisala RS41 transmits on-air;
+   verified against dl9rdz/rdz_ttgo_sonde's known-working SX1276 setup. */
 
 static const rf_profile_t s_profiles[] = {
     {

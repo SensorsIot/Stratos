@@ -2,7 +2,7 @@
 
 **Repository:** [SensorsIot/Stratos](https://github.com/SensorsIot/Stratos)
 **Status:** Draft v0.1 (initial generation, 2026-05-06)
-**License:** GPL-2.0 (firmware contains derivative work of `rs1729/RS`)
+**License:** GPL-2.0 (firmware is original code; rs1729/RS is the public protocol reference)
 **Target hardware:** LILYGO® TTGO LoRa32 V2.1_1.6 (ESP32 + Semtech SX1276, 433 MHz, on-board SSD1306 OLED)
 **Build system:** Espressif ESP-IDF (latest stable)
 
@@ -27,7 +27,7 @@ Existing open-source ESP32 radiosonde receivers (e.g. `dl9rdz/rdz_ttgo_sonde`) b
 | **Sonde chaser** (primary user) | Carries the device into the field, pairs phone via the BalloonHunter app, follows the sonde to landing. |
 | **Hobby operator / contributor** | Builds, flashes, and modifies the firmware. Adds future decoders. |
 | **Andreas Spiess (HB9BLA)** | Author of the BalloonHunter companion app. Stratos's primary BLE consumer. |
-| **rs1729** | Author of the upstream decoder reference implementation (`rs1729/RS`, GPL-2.0). Compatibility target via algorithm reuse. |
+| **rs1729** | Author of `rs1729/RS`, the public reference for radiosonde air protocols. Stratos uses the protocol facts documented there; no code is copied. |
 
 ### 1.4 Goals & Non-Goals
 
@@ -65,7 +65,7 @@ Existing open-source ESP32 radiosonde receivers (e.g. `dl9rdz/rdz_ttgo_sonde`) b
                     │                          ▼                   │
                     │                  ┌──────────────┐            │
                     │                  │ RS41 decoder │            │
-                    │                  │ (rs1729 port)│            │
+                    │                  │ (parser)│            │
                     │                  └──────┬───────┘            │
                     │                         ▼                    │
                     │                ┌─────────────────┐           │
@@ -96,7 +96,7 @@ The firmware is decomposed into the following logical subsystems:
 |---|---|
 | **RF Driver** | Configures and operates the SX1276 in continuous FSK RX mode; reads the FIFO on `DIO0` interrupt; produces a byte stream. |
 | **Decoder Manager** | Selects the active decoder (RS41 in v1) based on configured `sonde_type`. Provides architectural hooks for M10, M20, DFM, PILOT to be added later. |
-| **RS41 Decoder** | Ported from `rs1729/RS`. Consumes byte stream, performs Reed-Solomon, extracts GPS, baromertic, and identifying fields. Outputs `sonde_frame_t` events. |
+| **RS41 Decoder** | Original parser. Consumes the SX1276 byte stream, de-whitens (PRBS), extracts SondeID and ECEF GPS, converts to WGS84 lat/lon/alt, and emits `sonde_frame_t` events. Reed-Solomon ECC is a future enhancement. |
 | **Sonde State Manager** | Maintains the current state (`NO_SIGNAL` / `TRACKING` / `NAME_ONLY`) and the most recent decoded frame. Drives status broadcasts. |
 | **Stratos Codec (MySondyGo v3.0 wire-compatible)** | Serialises state into `0/.../o`, `1/.../o`, `2/.../o`, `3/.../o` ASCII frames per API v3.0. Parses inbound `o{...}o` commands. |
 | **BLE Server** | Exposes the Nordic UART Service (NUS). Routes inbound writes to the codec and outbound notifications from the codec. |
@@ -134,7 +134,7 @@ The firmware is decomposed into the following logical subsystems:
 
 **RTOS:** FreeRTOS (bundled with ESP-IDF).
 **ESP-IDF version:** Latest stable at time of build; pinned in `idf_component.yml`.
-**Language:** C (C11). C++ permitted only for component glue if a compelling reason exists — the rs1729 decoders are C and stay C.
+**Language:** C (C11). C++ permitted only for component glue if a compelling reason exists — new decoders are C.
 
 **Component layout (proposed):**
 
@@ -142,7 +142,7 @@ The firmware is decomposed into the following logical subsystems:
 components/
 ├── rf_sx1276/         SPI driver, FSK config, sync-match RX, FIFO consumer
 ├── decoder_core/      Decoder Manager + sonde_frame_t schema + dispatch table
-├── decoder_rs41/      Port of rs1729 RS41 decoder
+├── decoder_rs41/      RS41 frame parser
 ├── decoder_stub_m10/  Empty hook (returns "not implemented")
 ├── decoder_stub_m20/  Empty hook
 ├── decoder_stub_dfm/  Empty hook
@@ -241,7 +241,7 @@ Total cold boot to "device usable" target: ≤ 5 s.
 ### 3.3 Phase 3 — RS41 decoder
 
 **Scope:**
-- Port rs1729's RS41 decoder into the `decoder_rs41` component.
+- Implement the RS41 frame parser inside the `decoder_rs41` component (PRBS de-whitening, ECEF→WGS84, field extraction).
 - Adapt I/O: replace `stdin` / `fread` byte source with the byte queue from Phase 2.
 - Replace stdout printing with structured `sonde_frame_t` event publication.
 - Reed-Solomon, frame CRC, GPS extraction, AFC measurement, identifier (serial) extraction.
@@ -458,7 +458,7 @@ The receiver never makes outbound HTTPS requests. All OTA goes through the opera
 - **NFR-4.3** [Should]: HTTP server shall reject inputs > 4 KB on the config endpoint to prevent DoS via oversized POST.
 - **NFR-5.1** [Should]: The decoder dispatch table (§FR-2.6) shall require no more than ~50 lines of glue per added decoder.
 - **NFR-6.1** [May]: Battery voltage shall be reported within ±50 mV of true value when battery is present.
-- **NFR-7.1** [Must]: All firmware sources licensed under GPL-2.0 or compatible. Decoders ported from `rs1729/RS` retain GPL-2.0 attribution.
+- **NFR-7.1** [Must]: All firmware sources licensed under GPL-2.0 or compatible. Decoder code is original to this project (no third-party derivation).
 
 ### 4.3 Constraints
 
@@ -466,7 +466,7 @@ The receiver never makes outbound HTTPS requests. All OTA goes through the opera
 - **C-2**: Build system is ESP-IDF only. No Arduino-core compatibility shim.
 - **C-3**: BLE stack is NimBLE (not Bluedroid).
 - **C-4**: SX1276 is operated in raw FSK mode only. LoRa-mode operation is out of scope.
-- **C-5**: License must remain GPL-2.0 due to inclusion of `rs1729/RS` derivative work.
+- **C-5**: License is GPL-2.0 by choice; no third-party derived code is incorporated.
 - **C-6**: Receive-only operation. No regulatory licensing assumed for the device under operation; user is responsible for antenna and environment.
 - **C-7**: Embedded HTML UI must fit comfortably within the firmware image (target: HTML+CSS+JS payload ≤ 32 KB minified).
 
@@ -480,7 +480,7 @@ The receiver never makes outbound HTTPS requests. All OTA goes through the opera
 |---|---|---|---|
 | **R-1** Stratos defines its own GATT UUIDs (the MySondyGo API PDF specifies the application protocol but not the GATT layer). | Med | Med | Stratos exposes the standard Nordic UART Service (NUS) UUIDs (`6E400001-…`) on which the ASCII protocol rides. BalloonHunter targets these UUIDs. Other MySondyGo-aware clients that hard-code different service UUIDs may need a one-line patch. |
 | **R-2** SX1276 FSK config quirks — sync-word matching, deviation, and RX BW interactions are not always documented; bench-tuning may be required per sonde type. | Medium | Medium | Allocate 2 days of bench time in Phase 2 with a known RS41 capture; document the working register values per sonde type as a baseline. |
-| **R-3** rs1729 decoder port complexity — the C is research-grade, with `stdin`/`stdout` assumptions and ad-hoc globals. | Medium | Medium | Treat the port as a one-time fork: encapsulate inside `decoder_rs41`, do not try to re-merge upstream. Track upstream changes manually. |
+| **R-3** RS41 protocol facts (PRBS sequence, sync word, frame offsets, ECEF math) come from public references. A misread fact silently corrupts every decoded frame. | Med | Med | Validate decoded GPS coords against SondeHub for known launches; cross-check serial numbers against the printed labels on real sondes. |
 | **R-4** BLE + WiFi coexistence on shared 2.4 GHz radio. | Low | Medium | Standard ESP32 dual-mode is well supported; allocate one dedicated soak test in Phase 5 (NFR-2.1). |
 | **R-5** No real sonde available for testing during dry seasons / non-launch windows. | Medium | Medium | Record I/Q with rtl-sdr during a launch window; replay through the SX1276 via attenuator and dummy-load coupling, or via a second SX1276 in TX mode (test rig only — not the production firmware). |
 | **R-6** Flash / RAM pressure when adding NimBLE + WiFi + httpd + OLED + decoder. | Low | Medium | Budget early (target build ≤ 70 % of 4 MB flash, ≤ 60 % of 320 KB heap at idle). Profile in Phase 1. |
@@ -505,7 +505,7 @@ The receiver never makes outbound HTTPS requests. All OTA goes through the opera
 - ESP-IDF (latest stable) — Espressif official toolchain.
 - NimBLE host stack (`esp-nimble-cpp` or vanilla `esp_nimble` — vanilla preferred).
 - `esp_http_server`, `esp_wifi` (SoftAP only), `nvs_flash`, `esp_ota_ops` — all part of ESP-IDF.
-- `rs1729/RS` — GPL-2.0 reference decoder source (vendored, not submodule, at a pinned commit).
+- `rs1729/RS` — public RS41 protocol reference. Consulted for protocol facts (PRBS, frame layout, ECEF math). No code copied.
 - BalloonHunter app (closed source, Play Store) — not modified, used as conformance peer.
 
 ### 5.4 Environmental Constraints
@@ -1031,7 +1031,7 @@ When `NO_SIGNAL`: replace decode rows with `── searching ──` plus rotati
 ### F. Reference URLs
 
 - MySondyGo API v3.0 (2025-04-02): https://download.farenight.it/MySondyGoAPI_V3.pdf
-- rs1729 decoder source: https://github.com/rs1729/RS (GPL-2.0)
+- RS41 protocol reference (rs1729/RS): https://github.com/rs1729/RS (GPL-2.0; consulted for protocol facts only)
 - Cross-reference (do not import): https://github.com/dl9rdz/rdz_ttgo_sonde
 - TTGO LoRa32 v2.1 (LilyGO): https://lilygo.cc/products/lora3 (vendor product page; schematic available separately)
 

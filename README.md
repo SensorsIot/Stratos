@@ -169,7 +169,7 @@ There is no STA mode, no GitHub-pull update path, and no auto-update.
 |---|---|
 | RTOS / framework | **ESP-IDF v5.5** (FreeRTOS). No Arduino-core compatibility shim. |
 | Radio | **Semtech SX1276** in raw FSK continuous-RX mode (not LoRa). Custom SPI driver, sync-word matching, FIFO drain on `DIO0` interrupt. |
-| Decoder | RS41 algorithms ported from **[`rs1729/RS`](https://github.com/rs1729/RS)** (GPL-2.0) — the de-facto reference for radiosonde decoding. |
+| Decoder | Original RS41 parser. Protocol facts (PRBS whitening, frame layout, ECEF→WGS84) per the publicly documented air protocol; **[`rs1729/RS`](https://github.com/rs1729/RS)** is the canonical reference. |
 | Bluetooth | **NimBLE** host stack (built into ESP-IDF). Exposes the Nordic UART Service (NUS); Stratos's MySondyGo-v3.0-compatible ASCII protocol rides on top. |
 | OLED | SSD1306 driver via the IDF `i2c_master` API (page-addressing mode). |
 | Web | ESP-IDF `esp_http_server`. Single-page HTML embedded in firmware via `EMBED_TXTFILES` — no SPIFFS / LittleFS partition. |
@@ -191,13 +191,11 @@ Stratos's BLE payload format is identical to the **MySondyGo API v3.0 ASCII prot
 ## 🙏 References & Credits
 
 - **[BalloonHunter](https://github.com/SensorsIot/BalloonHunter)** — companion iOS/Android app (Andreas Spiess, HB9BLA). Stratos's primary BLE consumer.
-- **[`rs1729/RS`](https://github.com/rs1729/RS)** — *the* upstream open-source radiosonde decoder collection (GPL-2.0). Almost every open-source RS41/M10/M20/DFM/PILOT receiver — Stratos included — derives its demodulator and frame parser from this work. **Stratos's RS41 decoder is a port of `rs1729/RS`.** See [NOTICE.md](NOTICE.md) for full attribution.
+- **[`rs1729/RS`](https://github.com/rs1729/RS)** — public protocol reference for the Vaisala RS41 (and other radiosondes). Stratos's RS41 parser is original; no code is copied.
 - **[`dl9rdz/rdz_ttgo_sonde`](https://github.com/dl9rdz/rdz_ttgo_sonde)** — sister project, cross-referenced for hardware quirks and SX1276 RS41 register values. Not a code dependency.
 - **[SondeHub](https://sondehub.org)** — global radiosonde tracking network.
 - **[Mirko Dalmonte (IZ4PNN)](https://download.farenight.it/MySondyGoAPI_V3.pdf)** — author of the MySondyGo API v3.0 specification, which Stratos's BLE wire format implements (no code copied — implemented from the published spec).
 
 ## 📜 License
 
-**GPL-2.0** — see [LICENSE](LICENSE) for the full license text and [NOTICE.md](NOTICE.md) for the third-party-attribution summary.
-
-Stratos is licensed under GPL-2.0 because it incorporates code derived from `rs1729/RS` (GPL-2.0). As long as that derivation exists, the combined work must be distributed under GPL-2.0 or a later GPL version.
+**GPL-2.0** — see [LICENSE](LICENSE). Licensed under GPL-2.0 by choice; no third-party derived code is incorporated.
