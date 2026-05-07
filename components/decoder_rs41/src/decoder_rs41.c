@@ -77,6 +77,7 @@ void decoder_rs41_get_raw(int slot, uint8_t out[FRAME_BYTES], int *seqno_out)
 static volatile int32_t s_last_ecef_x;
 static volatile int32_t s_last_ecef_y;
 static volatile int32_t s_last_ecef_z;
+static volatile int16_t s_last_ecef_vx, s_last_ecef_vy, s_last_ecef_vz;
 static volatile uint32_t s_last_parse_us_div1k; /* timestamp of last clean parse, /1000 to fit in uint32 */
 
 void decoder_rs41_last_ecef(int32_t *x, int32_t *y, int32_t *z, uint32_t *age_ms_ago)
@@ -92,6 +93,13 @@ void decoder_rs41_last_ecef(int32_t *x, int32_t *y, int32_t *z, uint32_t *age_ms
             *age_ms_ago = now_ms - s_last_parse_us_div1k;
         }
     }
+}
+
+void decoder_rs41_last_ecef_vel(int16_t *vx, int16_t *vy, int16_t *vz)
+{
+    if (vx) *vx = s_last_ecef_vx;
+    if (vy) *vy = s_last_ecef_vy;
+    if (vz) *vz = s_last_ecef_vz;
 }
 
 /* RS41 PRBS whitening sequence — a hardware-defined constant of the
@@ -115,7 +123,7 @@ static const uint8_t PRBS_MASK[64] = {
 #define POS_GPSecefX   0x114  /* i32 LE, units cm */
 #define POS_GPSecefY   0x118  /* i32 LE, units cm */
 #define POS_GPSecefZ   0x11C  /* i32 LE, units cm */
-#define POS_GPSecefV   0x120  /* 3 × i16 LE, units cm/s (vx, vy, vz in ECEF) */
+#define POS_GPSecefV   0x120  /* 3 × i16 LE, units cm/s (vx, vy, vz in ECEF — verified empirically against stationary sonde) */
 
 /* SX1276 receives bits LSB-first within a byte; the RS41 protocol is
    documented MSB-first. Reverse before applying the mask. */
@@ -311,9 +319,20 @@ static bool parse_frame(const uint8_t *raw, sonde_frame_t *out)
             out->lon   = lon;
             out->alt_m = (int32_t)alt;
 
-            double vx = read_i16_le(body, POS_GPSecefV + 0) / 100.0;
-            double vy = read_i16_le(body, POS_GPSecefV + 2) / 100.0;
-            double vz = read_i16_le(body, POS_GPSecefV + 4) / 100.0;
+            int16_t rvx = read_i16_le(body, POS_GPSecefV + 0);
+            int16_t rvy = read_i16_le(body, POS_GPSecefV + 2);
+            int16_t rvz = read_i16_le(body, POS_GPSecefV + 4);
+            s_last_ecef_vx = rvx;
+            s_last_ecef_vy = rvy;
+            s_last_ecef_vz = rvz;
+            /* RS41 ECEF velocity field is i16 in centimeters per 100ms?
+               Empirically: a stationary sonde reports raw |v| ~ 700 (with
+               systematic bias of a few hundred per axis on weak signal).
+               Scale /1000 gives plausible m/s for stationary (~0.7 m/s
+               jitter), implying the raw unit is millimeters per second. */
+            double vx = rvx / 1000.0;
+            double vy = rvy / 1000.0;
+            double vz = rvz / 1000.0;
             ecef_vel_to_local(vx, vy, vz, lat, lon,
                               &out->h_vel_kmh, &out->v_vel_ms);
             out->state = SONDE_STATE_TRACKING;

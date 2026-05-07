@@ -14,6 +14,11 @@ const decoder_vtable_t *decoder_rs41_vtable(void);
    has happened since boot. */
 void decoder_rs41_last_ecef(int32_t *x, int32_t *y, int32_t *z, uint32_t *age_ms_ago);
 
+/* Diagnostic: returns the last raw ECEF velocity (i16 each axis, units
+   per the RS41 protocol — assumed cm/s; reading the raw value lets the
+   user verify the unit empirically). */
+void decoder_rs41_last_ecef_vel(int16_t *vx, int16_t *vy, int16_t *vz);
+
 /* Diagnostic: number of byte errors the Reed-Solomon decoder corrected in
    the most recent parsed frame. -1 means RS rejected the frame (more than
    12 errors per codeword); 0 means the frame was already clean. */

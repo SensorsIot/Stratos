@@ -82,6 +82,8 @@ static esp_err_t h_state(httpd_req_t *req)
     int rs_errs = decoder_rs41_last_rs_errs();
     int rs_s1   = decoder_rs41_last_synd1();
     int rs_s2   = decoder_rs41_last_synd2();
+    int16_t vx = 0, vy = 0, vz = 0;
+    decoder_rs41_last_ecef_vel(&vx, &vy, &vz);
 
     int n = snprintf(buf, sizeof(buf),
         "{"
@@ -96,6 +98,7 @@ static esp_err_t h_state(httpd_req_t *req)
         "\"rf_bytes\":%lu,\"rf_sync\":%lu,"
         "\"ecef_x\":%ld,\"ecef_y\":%ld,\"ecef_z\":%ld,\"ecef_age_ms\":%lu,"
         "\"rs_errs\":%d,\"rs_s1\":%d,\"rs_s2\":%d,"
+        "\"ecef_vx\":%d,\"ecef_vy\":%d,\"ecef_vz\":%d,"
         "\"version\":\"%s\","
         "\"uptime_s\":%lld"
         "}",
@@ -110,6 +113,7 @@ static esp_err_t h_state(httpd_req_t *req)
         (unsigned long)st_rf_sync_count(),
         (long)ecef_x, (long)ecef_y, (long)ecef_z, (unsigned long)ecef_age_ms,
         rs_errs, rs_s1, rs_s2,
+        (int)vx, (int)vy, (int)vz,
         st_version_string(),
         esp_timer_get_time() / 1000000LL);
     if (n < 0 || n >= (int)sizeof(buf)) return ESP_FAIL;
