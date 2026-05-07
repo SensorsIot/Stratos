@@ -46,7 +46,8 @@ Existing open-source ESP32 radiosonde receivers (e.g. `dl9rdz/rdz_ttgo_sonde`) b
 **Non-Goals (v1):**
 - Multi-channel frequency scanning or auto-search.
 - Decoders for RS92, MRZ, iMet, Meisei, or LMS6.
-- M10 / M20 / DFM / PILOT decoders (architectural hooks only — see §2.3).
+- **Verified** decoders for any sonde other than RS41. M10 / M20 parsers and a DFM skeleton ship on the `multi-sonde` branch (FSD §11) but are **not yet verified against real signals** — only RS41 is tested end-to-end.
+- PILOT decoder (architectural hooks only — see §2.3).
 - Battery-life optimisation, deep-sleep modes.
 - Outbound uploaders (SondeHub, APRS-IS, MQTT).
 - TFT display variants — SSD1306 OLED only.
@@ -1207,6 +1208,45 @@ For each format the work is the same shape:
    call v1.5 done and harden.
 
 Implementation tracks on a feature branch, separate from `main`.
+
+### 11.7 Implementation status (as of 2026-05-07)
+
+The `multi-sonde` branch (commit `298cd1b`) carries the second pass of
+multi-format work. Code-complete components and what is *verified*
+diverge — the receiver has only ever been tested against a real RS41:
+
+| Format | Code | Bench-tested vs real signal |
+|---|---|---|
+| **RS41** | ✅ full pipeline (RF profile, parser, RS(255,231) ECC, ECEF→WGS84) | ✅ **Verified.** Live decode of a stationary sonde at 47.4746 N, 7.7676 E (Switzerland) at 380 m, `state=TRACKING`, `rs_errs=0` on clean codewords, h_kmh ≤ 0.8, v_ms ≤ ±0.2. |
+| **M10** | ✅ Manchester chip→data, custom rolling CRC port, BE field extraction (lat/lon × 1/0xB60B60, alt × 0.001, vel × 0.005), 60 s sticky-lock | ❌ **Untested.** No real M10 sonde locally; field offsets and CRC algorithm taken from public references (rs1729/RS, dl9rdz/rdz_ttgo_sonde) but unconfirmed on-air. |
+| **M20** | ✅ Same architecture as M10; M20-specific offsets (lat/lon × 1e-6 @ +28/+32, alt i24 × 0.01 @ +8, vel × 0.01), 88-byte frame | ❌ **Untested.** Same caveat as M10. |
+| **DFM-09 / DFM-17** | 🟡 Skeleton: Manchester accumulator, NAME_ONLY placeholder; subframe de-interleaver, Hamming(8,4) FEC, BCH ECC, GPS subframe extraction not yet implemented | ❌ **Untested.** Skeleton publishes a placeholder when chip stream fills the buffer — no positional decode yet. |
+| **RS92 / PILOT / iMet / MRZ / MEISEI** | not started | — |
+
+Cross-cutting bring-up still owed before M10/M20/DFM can be declared
+working:
+
+- **Per-profile FIFO drain timing.** RS41 at 4800 bps drains every 30 ms
+  comfortably; M10/M20 at 9600 bps fills the 64-byte FIFO in ~53 ms,
+  so the global 30 ms loop cuts it fine. Either tighten the global
+  drain to 15 ms or expose `fifo_drain_ms` per `rf_profile_t`.
+- **Sync detection for Manchester formats.** SX1276's hardware
+  sync-word matcher operates on the chip stream (not the data stream)
+  for M10/M20/DFM, so the configured sync byte must match the chip-rate
+  pattern, not the original data byte. M10 currently uses a 1-byte
+  `0x66`; if frames arrive misaligned, fall back to a 2- or 3-byte
+  chip pattern (`0xcccca64c` or `0x333359b3` per rdz reference).
+- **Sticky-lock decision logic** publishes `NAME_ONLY` on CRC-clean
+  frames whose lat/lon is implausible. Consider tightening to require
+  CRC + plausible position in a window before raising `TRACKING`.
+- **Per-format Python harness.** `/api/raw` capture + offline decoder
+  in Python, mirroring the RS41 harness, so M10/M20 fields can be
+  iterated without flashing.
+
+Verification of M10/M20/DFM blocks on access to a real signal — either
+a sonde flying within range or an I/Q replay from rtl-sdr-archive +
+attenuator coupling into the SX1276. Until then `multi-sonde` ships
+unmerged.
 
 ---
 

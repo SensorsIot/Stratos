@@ -34,7 +34,7 @@ Buy the board, flash this firmware, attach a 433 MHz antenna, open BalloonHunter
 **Limitations (v1, by design):**
 
 - One frequency at a time — no scanner or auto-search.
-- RS41 sondes only. Hooks exist for M10, M20, DFM, PILOT, but no decoders are wired up yet.
+- **Only RS41 is verified against real signals.** M10 + M20 parsers and a DFM skeleton live on the `multi-sonde` branch (FSD §11.7) — code-complete and registered with the decoder core, but never confirmed on-air. Selecting M10/M20/DFM in the web UI tunes the radio and runs the decoder; whether it produces a valid `TRACKING` frame is unknown until tested against a live sonde.
 - AP-only — no STA mode, no GitHub-pull OTA. Updates are operator-driven from a phone or laptop on the AP.
 - No deep-sleep / battery optimisation.
 - No outbound uploaders (no SondeHub, APRS-IS, MQTT).
@@ -158,7 +158,10 @@ There is no STA mode, no GitHub-pull update path, and no auto-update.
 │   ├── stratos_codec/          BLE wire-format codec (MySondyGo v3.0 wire-compatible)
 │   ├── rf_sx1276/              FSK RX driver for Semtech SX1276
 │   ├── decoder_core/           per-sonde-type decoder vtable
-│   ├── decoder_rs41/           Vaisala RS41 frame decoder
+│   ├── decoder_rs41/           Vaisala RS41 frame decoder (✅ tested on-air)
+│   ├── decoder_m10/            Meteomodem M10 frame decoder (multi-sonde branch, untested)
+│   ├── decoder_m20/            Meteomodem M20 frame decoder (multi-sonde branch, untested)
+│   ├── decoder_dfm/            Graw DFM-09/17 skeleton (multi-sonde branch, no parser yet)
 │   ├── sonde_state/            decoded-frame state machine
 │   └── sonde_types/            shared types and event base
 ├── docs/fsd/Stratos FSD.md     canonical specification
